@@ -6,9 +6,5 @@ pages_build_output_dir = "dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "resell-platform-db"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "c98b0503-52e1-4cac-ba21-fede0bb57d78"
 migrations_dir = "migrations"
-
-[[r2_buckets]]
-binding = "LISTING_IMAGES"
-bucket_name = "resell-platform-images"

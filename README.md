@@ -56,12 +56,13 @@ The repository is configured for Cloudflare Pages Functions, D1, and R2:
 - Node version: `22.12.0` or newer
 - Pages Functions directory: `functions`
 - D1 binding: `DB`
-- R2 binding: `LISTING_IMAGES`
+- R2 binding: `LISTING_IMAGES` after R2 is enabled on the Cloudflare account
 
 Create the Cloudflare resources:
 
 ```bash
 npm run cf:d1:create
+# optional after R2 is enabled in the Cloudflare dashboard
 npm run cf:r2:create
 ```
 
@@ -89,4 +90,5 @@ npm run deploy
 - Pages Functions expose `/api/state`, `/api/listings`, `/api/reservations`, `/api/messages`, reservation status updates, and notification read actions.
 - Reservation creation updates listing availability in D1 with a conditional update, so a second buyer cannot reserve the same available item.
 - Chat writes messages to D1 after checking the sender is the reservation buyer or seller.
-- R2 is configured as `LISTING_IMAGES`; new listing uploads store image bytes in R2 and D1 stores the served image path plus R2 key.
+- When the `LISTING_IMAGES` R2 binding is configured, new listing uploads store image bytes in R2 and D1 stores the served image path plus R2 key.
+- Until R2 is enabled, the Functions fallback stores uploaded image data URLs in D1 so the platform can still run with a real shared database.
