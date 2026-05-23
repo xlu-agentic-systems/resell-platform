@@ -58,6 +58,16 @@ button:disabled {
   font-weight: 800;
 }
 
+.data-source {
+  width: fit-content;
+  border-radius: 999px;
+  background: #26343b;
+  color: #dbe4e2;
+  padding: 5px 9px;
+  font-size: 0.75rem;
+  font-weight: 900;
+}
+
 .user-switcher {
   display: grid;
   gap: 8px;
@@ -153,6 +163,17 @@ nav {
 
 .mobile-user-bar {
   display: none;
+}
+
+.global-error {
+  max-width: 1360px;
+  margin: 0 auto 12px;
+  border: 1px solid #f0b5ad;
+  border-radius: 8px;
+  background: #ffe0dc;
+  color: #8a2c21;
+  padding: 10px 12px;
+  font-weight: 800;
 }
 
 .workspace {
@@ -579,7 +600,8 @@ label {
   }
 
   .mobile-user-bar {
-    display: block;
+    display: grid;
+    gap: 10px;
     margin: 0 0 12px;
     padding: 12px;
     background: #fff;

@@ -1,0 +1,410 @@
+import type {
+  AppState,
+  Listing,
+  ListingDraft,
+  ListingImage,
+  Message,
+  Notification,
+  Reservation,
+  ReservationStatus,
+  User
+} from "../../src/data/types";
+import { ApiError } from "./http";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const TERMINAL_RESERVATION_STATUSES = new Set<ReservationStatus>(["paid", "sold", "cancelled"]);
+
+export type Env = {
+  DB: D1Database;
+  LISTING_IMAGES?: R2Bucket;
+};
+
+type UserRow = {
+  id: string;
+  name: string;
+  role: User["role"];
+};
+
+type ListingRow = {
+  id: string;
+  seller_id: string;
+  title: string;
+  description: string;
+  price: number;
+  category: string;
+  condition: Listing["condition"];
+  location: string;
+  status: Listing["status"];
+  created_at: string;
+  updated_at: string;
+};
+
+type ListingImageRow = {
+  id: string;
+  listing_id: string;
+  name: string;
+  data_url: string;
+  is_primary: number;
+  created_at: string;
+};
+
+type ReservationRow = {
+  id: string;
+  listing_id: string;
+  buyer_id: string;
+  seller_id: string;
+  status: ReservationStatus;
+  payment_due_at: string;
+  overdue_notified_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type MessageRow = {
+  id: string;
+  reservation_id: string;
+  sender_id: string;
+  body: string;
+  created_at: string;
+};
+
+type NotificationRow = {
+  id: string;
+  user_id: string;
+  type: Notification["type"];
+  title: string;
+  body: string;
+  entity_id?: string | null;
+  read_at?: string | null;
+  created_at: string;
+};
+
+export function createId(prefix: string) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+export async function readState(db: D1Database, activeUserId = "seller-1"): Promise<AppState> {
+  await markOverdueReservations(db);
+
+  const [users, listings, images, reservations, messages, notifications] = await Promise.all([
+    db.prepare("SELECT id, name, role FROM users ORDER BY created_at, name").all<UserRow>(),
+    db.prepare("SELECT * FROM listings ORDER BY created_at DESC").all<ListingRow>(),
+    db.prepare("SELECT * FROM listing_images ORDER BY created_at").all<ListingImageRow>(),
+    db.prepare("SELECT * FROM reservations ORDER BY created_at DESC").all<ReservationRow>(),
+    db.prepare("SELECT * FROM messages ORDER BY created_at").all<MessageRow>(),
+    db.prepare("SELECT * FROM notifications ORDER BY created_at DESC").all<NotificationRow>()
+  ]);
+
+  const imagesByListing = new Map<string, ListingImage[]>();
+  for (const row of images.results) {
+    const listingImages = imagesByListing.get(row.listing_id) ?? [];
+    listingImages.push({
+      id: row.id,
+      name: row.name,
+      dataUrl: row.data_url,
+      primary: row.is_primary === 1,
+      createdAt: row.created_at
+    });
+    imagesByListing.set(row.listing_id, listingImages);
+  }
+
+  return {
+    users: users.results.map((row) => ({
+      id: row.id,
+      name: row.name,
+      role: row.role
+    })),
+    activeUserId,
+    listings: listings.results.map((row) => ({
+      id: row.id,
+      sellerId: row.seller_id,
+      title: row.title,
+      description: row.description,
+      price: row.price,
+      category: row.category,
+      condition: row.condition,
+      location: row.location,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      images: imagesByListing.get(row.id) ?? []
+    })),
+    reservations: reservations.results.map((row) => ({
+      id: row.id,
+      listingId: row.listing_id,
+      buyerId: row.buyer_id,
+      sellerId: row.seller_id,
+      status: row.status,
+      paymentDueAt: row.payment_due_at,
+      overdueNotifiedAt: row.overdue_notified_at ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    })),
+    messages: messages.results.map((row) => ({
+      id: row.id,
+      reservationId: row.reservation_id,
+      senderId: row.sender_id,
+      body: row.body,
+      createdAt: row.created_at
+    })),
+    notifications: notifications.results.map((row) => ({
+      id: row.id,
+      userId: row.user_id,
+      type: row.type,
+      title: row.title,
+      body: row.body,
+      entityId: row.entity_id ?? undefined,
+      readAt: row.read_at ?? undefined,
+      createdAt: row.created_at
+    }))
+  };
+}
+
+export async function createListingInDb(db: D1Database, sellerId: string, draft: ListingDraft) {
+  const seller = await db.prepare("SELECT id, role FROM users WHERE id = ?").bind(sellerId).first<UserRow>();
+  if (!seller || seller.role !== "seller") {
+    throw new ApiError("Only sellers can create listings.", 403);
+  }
+  if (!draft.title.trim() || !draft.description.trim() || !draft.location.trim() || draft.price <= 0) {
+    throw new ApiError("Listing title, description, location, and price are required.");
+  }
+  if (draft.images.length === 0 || draft.images.length > 6) {
+    throw new ApiError("Listings must include 1-6 images.");
+  }
+
+  const now = new Date().toISOString();
+  const listingId = createId("listing");
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO listings (
+          id, seller_id, title, description, price, category, condition, location, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'available', ?, ?)`
+      )
+      .bind(
+        listingId,
+        sellerId,
+        draft.title.trim(),
+        draft.description.trim(),
+        draft.price,
+        draft.category,
+        draft.condition,
+        draft.location.trim(),
+        now,
+        now
+      ),
+    ...draft.images.map((image, index) =>
+      db
+        .prepare(
+          `INSERT INTO listing_images (id, listing_id, name, data_url, is_primary, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .bind(image.id || createId("image"), listingId, image.name, image.dataUrl, index === 0 ? 1 : 0, now)
+    )
+  ]);
+}
+
+export async function reserveListingInDb(db: D1Database, listingId: string, buyerId: string) {
+  const listing = await db.prepare("SELECT * FROM listings WHERE id = ?").bind(listingId).first<ListingRow>();
+  if (!listing) throw new ApiError("Listing not found.", 404);
+  if (listing.seller_id === buyerId) throw new ApiError("Sellers cannot reserve their own listings.", 403);
+
+  const now = new Date();
+  const reservationId = createId("reservation");
+  const paymentDueAt = new Date(now.getTime() + DAY_MS).toISOString();
+  const updated = await db
+    .prepare(
+      "UPDATE listings SET status = 'reserved', updated_at = ? WHERE id = ? AND status = 'available' AND seller_id != ?"
+    )
+    .bind(now.toISOString(), listingId, buyerId)
+    .run();
+
+  if (!updated.meta.changes) {
+    throw new ApiError("Listing is no longer available.", 409);
+  }
+
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO reservations (
+          id, listing_id, buyer_id, seller_id, status, payment_due_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'awaiting_payment', ?, ?, ?)`
+      )
+      .bind(reservationId, listingId, buyerId, listing.seller_id, paymentDueAt, now.toISOString(), now.toISOString()),
+    db
+      .prepare(
+        `INSERT INTO notifications (id, user_id, type, title, body, entity_id, created_at)
+         VALUES (?, ?, 'reservation_created', 'New reservation', ?, ?, ?)`
+      )
+      .bind(
+        createId("notification"),
+        listing.seller_id,
+        `${await getUserName(db, buyerId)} reserved ${listing.title}.`,
+        reservationId,
+        now.toISOString()
+      )
+  ]);
+}
+
+export async function sendMessageInDb(db: D1Database, reservationId: string, senderId: string, body: string) {
+  const trimmed = body.trim();
+  if (!trimmed) throw new ApiError("Message body is required.");
+
+  const reservation = await getReservationForParticipant(db, reservationId, senderId);
+  const listing = await db.prepare("SELECT title FROM listings WHERE id = ?").bind(reservation.listing_id).first<{ title: string }>();
+  const now = new Date().toISOString();
+  const receiverId = reservation.seller_id === senderId ? reservation.buyer_id : reservation.seller_id;
+
+  await db.batch([
+    db
+      .prepare("INSERT INTO messages (id, reservation_id, sender_id, body, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(createId("message"), reservationId, senderId, trimmed, now),
+    db
+      .prepare(
+        `INSERT INTO notifications (id, user_id, type, title, body, entity_id, created_at)
+         VALUES (?, ?, 'message_received', 'New message', ?, ?, ?)`
+      )
+      .bind(
+        createId("notification"),
+        receiverId,
+        `${await getUserName(db, senderId)} sent a message about ${listing?.title ?? "a listing"}.`,
+        reservationId,
+        now
+      )
+  ]);
+}
+
+export async function updateReservationStatusInDb(
+  db: D1Database,
+  reservationId: string,
+  actorId: string,
+  status: ReservationStatus
+) {
+  const reservation = await getReservationForParticipant(db, reservationId, actorId);
+  if (TERMINAL_RESERVATION_STATUSES.has(reservation.status)) {
+    throw new ApiError("Terminal reservations cannot be changed.", 409);
+  }
+  if ((status === "paid" || status === "sold") && actorId !== reservation.seller_id) {
+    throw new ApiError("Only the seller can mark payment as paid.", 403);
+  }
+  if (status === "payment_sent" && actorId !== reservation.buyer_id) {
+    throw new ApiError("Only the buyer can mark payment sent.", 403);
+  }
+
+  const now = new Date().toISOString();
+  const statements = [
+    db
+      .prepare("UPDATE reservations SET status = ?, updated_at = ? WHERE id = ?")
+      .bind(status, now, reservationId)
+  ];
+
+  if (status === "paid" || status === "sold") {
+    statements.push(
+      db
+        .prepare("UPDATE listings SET status = 'sold', updated_at = ? WHERE id = ?")
+        .bind(now, reservation.listing_id)
+    );
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO notifications (id, user_id, type, title, body, entity_id, created_at)
+           VALUES (?, ?, 'payment_paid', 'Payment confirmed', ?, ?, ?)`
+        )
+        .bind(
+          createId("notification"),
+          reservation.buyer_id,
+          "The seller marked your off-platform payment as received.",
+          reservationId,
+          now
+        )
+    );
+  }
+
+  if (status === "cancelled") {
+    statements.push(
+      db
+        .prepare("UPDATE listings SET status = 'available', updated_at = ? WHERE id = ?")
+        .bind(now, reservation.listing_id)
+    );
+  }
+
+  await db.batch(statements);
+}
+
+export async function markNotificationsReadInDb(db: D1Database, userId: string) {
+  await db
+    .prepare("UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE user_id = ?")
+    .bind(new Date().toISOString(), userId)
+    .run();
+}
+
+async function markOverdueReservations(db: D1Database) {
+  const now = new Date().toISOString();
+  const overdue = await db
+    .prepare(
+      `SELECT r.*, l.title, u.name AS buyer_name
+       FROM reservations r
+       JOIN listings l ON l.id = r.listing_id
+       JOIN users u ON u.id = r.buyer_id
+       WHERE r.status = 'awaiting_payment'
+         AND r.overdue_notified_at IS NULL
+         AND r.payment_due_at <= ?`
+    )
+    .bind(now)
+    .all<ReservationRow & { title: string; buyer_name: string }>();
+
+  for (const reservation of overdue.results) {
+    const updated = await db
+      .prepare(
+        `UPDATE reservations
+         SET status = 'overdue', overdue_notified_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'awaiting_payment' AND overdue_notified_at IS NULL`
+      )
+      .bind(now, now, reservation.id)
+      .run();
+
+    if (!updated.meta.changes) continue;
+
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO notifications (id, user_id, type, title, body, entity_id, created_at)
+           VALUES (?, ?, 'payment_overdue', 'Payment overdue', ?, ?, ?)`
+        )
+        .bind(
+          createId("notification"),
+          reservation.buyer_id,
+          `Payment is overdue for ${reservation.title}.`,
+          reservation.id,
+          now
+        ),
+      db
+        .prepare(
+          `INSERT INTO notifications (id, user_id, type, title, body, entity_id, created_at)
+           VALUES (?, ?, 'payment_overdue', 'Payment overdue', ?, ?, ?)`
+        )
+        .bind(
+          createId("notification"),
+          reservation.seller_id,
+          `${reservation.buyer_name} has not been marked paid for ${reservation.title}.`,
+          reservation.id,
+          now
+        )
+    ]);
+  }
+}
+
+async function getReservationForParticipant(db: D1Database, reservationId: string, userId: string) {
+  const reservation = await db
+    .prepare("SELECT * FROM reservations WHERE id = ? AND (buyer_id = ? OR seller_id = ?)")
+    .bind(reservationId, userId, userId)
+    .first<ReservationRow>();
+  if (!reservation) throw new ApiError("Reservation not found for this user.", 404);
+  return reservation;
+}
+
+async function getUserName(db: D1Database, userId: string) {
+  const user = await db.prepare("SELECT name FROM users WHERE id = ?").bind(userId).first<{ name: string }>();
+  return user?.name ?? "Someone";
+}
+

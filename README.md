@@ -11,10 +11,24 @@ npm run dev
 
 Open http://127.0.0.1:5173/ or the localhost URL Vite prints.
 
+This mode uses browser `localStorage` as a fallback and does not require Cloudflare.
+
+## Cloudflare Local Development
+
+Apply the D1 migrations to the local Wrangler database and run the Pages app with Functions:
+
+```bash
+npm run cf:d1:migrate:local
+npm run dev:cloudflare
+```
+
+Open http://localhost:8788/. The app will show `Cloudflare D1` when it is using the D1-backed API instead of local fallback storage.
+
 ## Verification
 
 ```bash
 npm run test
+npm run typecheck:functions
 npm run build
 ```
 
@@ -28,21 +42,51 @@ npm run build
 
 ## Current Limits
 
-- Data is stored in browser `localStorage`, so multi-user behavior is simulated on one device.
-- Uploaded images are stored as data URLs and are only suitable for demo-scale use.
-- Overdue monitoring runs when the app is open.
-- There is no real authentication, moderation, payment provider, or server-side reservation lock yet.
+- `npm run dev` still uses browser `localStorage`; use `npm run dev:cloudflare` to exercise D1.
+- Uploaded images are still stored as data URLs in D1 for MVP compatibility. The R2 binding is configured, but the upload path has not moved binary objects into R2 yet.
+- Overdue monitoring runs when `/api/state` is called. A production scheduled Worker should be added before relying on background notifications.
+- There is no real authentication, moderation, payment provider, or user signup yet.
 
-## Cloudflare Path
+## Cloudflare Deployment
 
-The first version is a static Vite app and can be deployed to Cloudflare Pages with:
+The repository is configured for Cloudflare Pages Functions, D1, and R2:
 
 - Build command: `npm run build`
 - Output directory: `dist`
 - Node version: `22.12.0` or newer
+- Pages Functions directory: `functions`
+- D1 binding: `DB`
+- R2 binding: `LISTING_IMAGES`
 
-Next production steps should replace the local adapters with Cloudflare services:
+Create the Cloudflare resources:
 
-- D1 for users, listings, reservations, messages, and notifications.
-- R2 for listing images.
-- Workers or Pages Functions for authorization, reservation locking, chat APIs, and overdue scheduled checks.
+```bash
+npm run cf:d1:create
+npm run cf:r2:create
+```
+
+Copy the returned D1 database ID into `wrangler.toml`, replacing:
+
+```text
+00000000-0000-0000-0000-000000000000
+```
+
+Apply the remote migrations:
+
+```bash
+npm run cf:d1:migrate:remote
+```
+
+Deploy the Pages app:
+
+```bash
+npm run deploy
+```
+
+## Cloudflare Architecture
+
+- D1 stores users, listings, listing image metadata, reservations, chat messages, and notifications.
+- Pages Functions expose `/api/state`, `/api/listings`, `/api/reservations`, `/api/messages`, reservation status updates, and notification read actions.
+- Reservation creation updates listing availability in D1 with a conditional update, so a second buyer cannot reserve the same available item.
+- Chat writes messages to D1 after checking the sender is the reservation buyer or seller.
+- R2 is configured as `LISTING_IMAGES` for the next step: moving uploaded image bytes out of D1 and storing only URLs/keys in the database.
