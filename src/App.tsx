@@ -25,6 +25,14 @@ import {
   sendMessage,
   updateReservationStatus
 } from "./data/store";
+import {
+  createRemoteListing,
+  fetchRemoteState,
+  markRemoteNotificationsRead,
+  reserveRemoteListing,
+  sendRemoteMessage,
+  updateRemoteReservationStatus
+} from "./data/remoteApi";
 import type { AppState, Listing, ListingDraft, ListingImage, Reservation } from "./data/types";
 
 type View = "browse" | "sell" | "orders" | "chat" | "notifications";
@@ -42,21 +50,53 @@ const blankDraft: ListingDraft = {
 
 export default function App() {
   const [state, setState] = useState<AppState>(() => computeOverdueNotifications(loadState()));
+  const [dataSource, setDataSource] = useState<"local" | "cloudflare">("local");
+  const [actionError, setActionError] = useState("");
   const [view, setView] = useState<View>("browse");
   const [selectedListingId, setSelectedListingId] = useState<string | null>("listing-1");
   const [selectedReservationId, setSelectedReservationId] = useState<string | null>("reservation-1");
   const [query, setQuery] = useState("");
 
   useEffect(() => {
-    saveState(state);
-  }, [state]);
+    if (dataSource === "local") {
+      saveState(state);
+    }
+  }, [dataSource, state]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchRemoteState(state.activeUserId)
+      .then((remoteState) => {
+        if (cancelled) return;
+        setState(remoteState);
+        setDataSource("cloudflare");
+        setActionError("");
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDataSource("local");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const id = window.setInterval(() => {
+      if (dataSource === "cloudflare") {
+        fetchRemoteState(state.activeUserId)
+          .then((remoteState) => {
+            setState(remoteState);
+            setActionError("");
+          })
+          .catch((error) => setActionError(error.message));
+        return;
+      }
       setState((current) => computeOverdueNotifications(current));
     }, 60_000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [dataSource, state.activeUserId]);
 
   const activeUser = state.users.find((user) => user.id === state.activeUserId) ?? state.users[0];
   const selectedListing = state.listings.find((listing) => listing.id === selectedListingId) ?? state.listings[0];
@@ -85,7 +125,33 @@ export default function App() {
     setState(computeOverdueNotifications(nextState));
   }
 
-  function handleReserve(listingId: string) {
+  async function runRemoteAction(action: () => Promise<AppState>) {
+    try {
+      const remoteState = await action();
+      setState(remoteState);
+      setDataSource("cloudflare");
+      setActionError("");
+      return remoteState;
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Cloudflare request failed.");
+      throw error;
+    }
+  }
+
+  async function handleReserve(listingId: string) {
+    if (dataSource === "cloudflare") {
+      const beforeIds = new Set(state.reservations.map((reservation) => reservation.id));
+      const next = await runRemoteAction(() => reserveRemoteListing(listingId, activeUser.id));
+      const reservation = next.reservations.find(
+        (item) => item.listingId === listingId && item.buyerId === activeUser.id && !beforeIds.has(item.id)
+      );
+      if (reservation) {
+        setSelectedReservationId(reservation.id);
+        setView("chat");
+      }
+      return;
+    }
+
     setState((current) => {
       const next = computeOverdueNotifications(reserveListing(current, listingId, activeUser.id));
       const reservation = next.reservations.find(
@@ -104,7 +170,14 @@ export default function App() {
     });
   }
 
-  function handleCreateListing(draft: ListingDraft) {
+  async function handleCreateListing(draft: ListingDraft) {
+    if (dataSource === "cloudflare") {
+      const next = await runRemoteAction(() => createRemoteListing(activeUser.id, draft));
+      setSelectedListingId(next.listings[0].id);
+      setView("browse");
+      return;
+    }
+
     const next = createListing(state, activeUser.id, draft);
     update(next);
     setSelectedListingId(next.listings[0].id);
@@ -118,6 +191,7 @@ export default function App() {
           <Store size={26} />
           <span>Resell</span>
         </div>
+        <div className="data-source">{dataSource === "cloudflare" ? "Cloudflare D1" : "Local demo"}</div>
         <UserSwitcher state={state} setState={setState} />
         <nav>
           <NavButton icon={<Search />} label="Browse" active={view === "browse"} onClick={() => setView("browse")} />
@@ -131,16 +205,20 @@ export default function App() {
             onClick={() => setView("notifications")}
           />
         </nav>
-        <button className="ghost reset" onClick={() => setState(computeOverdueNotifications(resetState()))}>
-          <RefreshCcw size={16} />
-          Reset demo
-        </button>
+        {dataSource === "local" && (
+          <button className="ghost reset" onClick={() => setState(computeOverdueNotifications(resetState()))}>
+            <RefreshCcw size={16} />
+            Reset demo
+          </button>
+        )}
       </aside>
 
       <main className="main">
         <div className="mobile-user-bar">
           <UserSwitcher state={state} setState={setState} />
+          <div className="data-source">{dataSource === "cloudflare" ? "Cloudflare D1" : "Local demo"}</div>
         </div>
+        {actionError && <p className="global-error">{actionError}</p>}
         {view === "browse" && (
           <BrowseView
             listings={visibleListings}
@@ -165,7 +243,9 @@ export default function App() {
               setView("chat");
             }}
             updateStatus={(reservationId, status) =>
-              update(updateReservationStatus(state, reservationId, activeUser.id, status))
+              dataSource === "cloudflare"
+                ? runRemoteAction(() => updateRemoteReservationStatus(reservationId, activeUser.id, status))
+                : update(updateReservationStatus(state, reservationId, activeUser.id, status))
             }
           />
         )}
@@ -176,9 +256,15 @@ export default function App() {
             selectedReservation={selectedReservation}
             selectReservation={setSelectedReservationId}
             reservations={userReservations}
-            send={(reservationId, body) => update(sendMessage(state, reservationId, activeUser.id, body))}
+            send={(reservationId, body) =>
+              dataSource === "cloudflare"
+                ? runRemoteAction(() => sendRemoteMessage(reservationId, activeUser.id, body))
+                : update(sendMessage(state, reservationId, activeUser.id, body))
+            }
             updateStatus={(reservationId, status) =>
-              update(updateReservationStatus(state, reservationId, activeUser.id, status))
+              dataSource === "cloudflare"
+                ? runRemoteAction(() => updateRemoteReservationStatus(reservationId, activeUser.id, status))
+                : update(updateReservationStatus(state, reservationId, activeUser.id, status))
             }
           />
         )}
@@ -187,6 +273,10 @@ export default function App() {
             state={state}
             activeUserId={activeUser.id}
             markAllRead={() => {
+              if (dataSource === "cloudflare") {
+                runRemoteAction(() => markRemoteNotificationsRead(activeUser.id));
+                return;
+              }
               const readAt = new Date().toISOString();
               setState({
                 ...state,
