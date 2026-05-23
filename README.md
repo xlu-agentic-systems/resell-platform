@@ -43,7 +43,7 @@ npm run build
 ## Current Limits
 
 - `npm run dev` still uses browser `localStorage`; use `npm run dev:cloudflare` to exercise D1.
-- Uploaded images are still stored as data URLs in D1 for MVP compatibility. The R2 binding is configured, but the upload path has not moved binary objects into R2 yet.
+- Seed demo images are stored as data URLs for portability. New Cloudflare listing uploads are written to R2 and D1 stores the served image path plus R2 key.
 - Overdue monitoring runs when `/api/state` is called. A production scheduled Worker should be added before relying on background notifications.
 - There is no real authentication, moderation, payment provider, or user signup yet.
 
@@ -89,4 +89,4 @@ npm run deploy
 - Pages Functions expose `/api/state`, `/api/listings`, `/api/reservations`, `/api/messages`, reservation status updates, and notification read actions.
 - Reservation creation updates listing availability in D1 with a conditional update, so a second buyer cannot reserve the same available item.
 - Chat writes messages to D1 after checking the sender is the reservation buyer or seller.
-- R2 is configured as `LISTING_IMAGES` for the next step: moving uploaded image bytes out of D1 and storing only URLs/keys in the database.
+- R2 is configured as `LISTING_IMAGES`; new listing uploads store image bytes in R2 and D1 stores the served image path plus R2 key.

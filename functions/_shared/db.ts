@@ -160,7 +160,8 @@ export async function readState(db: D1Database, activeUserId = "seller-1"): Prom
   };
 }
 
-export async function createListingInDb(db: D1Database, sellerId: string, draft: ListingDraft) {
+export async function createListingInDb(env: Env, sellerId: string, draft: ListingDraft) {
+  const db = env.DB;
   const seller = await db.prepare("SELECT id, role FROM users WHERE id = ?").bind(sellerId).first<UserRow>();
   if (!seller || seller.role !== "seller") {
     throw new ApiError("Only sellers can create listings.", 403);
@@ -174,6 +175,9 @@ export async function createListingInDb(db: D1Database, sellerId: string, draft:
 
   const now = new Date().toISOString();
   const listingId = createId("listing");
+  const images = await Promise.all(
+    draft.images.map((image, index) => persistListingImage(env, listingId, image, index === 0, now))
+  );
   await db.batch([
     db
       .prepare(
@@ -193,13 +197,21 @@ export async function createListingInDb(db: D1Database, sellerId: string, draft:
         now,
         now
       ),
-    ...draft.images.map((image, index) =>
+    ...images.map((image) =>
       db
         .prepare(
-          `INSERT INTO listing_images (id, listing_id, name, data_url, is_primary, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`
+          `INSERT INTO listing_images (id, listing_id, name, data_url, r2_key, is_primary, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
-        .bind(image.id || createId("image"), listingId, image.name, image.dataUrl, index === 0 ? 1 : 0, now)
+        .bind(
+          image.id,
+          listingId,
+          image.name,
+          image.dataUrl,
+          image.r2Key ?? null,
+          image.primary ? 1 : 0,
+          now
+        )
     )
   ]);
 }
@@ -408,3 +420,55 @@ async function getUserName(db: D1Database, userId: string) {
   return user?.name ?? "Someone";
 }
 
+async function persistListingImage(
+  env: Env,
+  listingId: string,
+  image: ListingImage,
+  primary: boolean,
+  createdAt: string
+): Promise<ListingImage & { r2Key?: string }> {
+  const id = image.id || createId("image");
+  const parsed = parseBase64DataUrl(image.dataUrl);
+  if (!env.LISTING_IMAGES || !parsed) {
+    return {
+      ...image,
+      id,
+      primary,
+      createdAt
+    };
+  }
+
+  const key = `${listingId}-${id}-${sanitizeFilename(image.name)}`;
+  await env.LISTING_IMAGES.put(key, parsed.bytes, {
+    httpMetadata: {
+      contentType: parsed.contentType
+    }
+  });
+
+  return {
+    ...image,
+    id,
+    dataUrl: `/api/images/${encodeURIComponent(key)}`,
+    primary,
+    createdAt,
+    r2Key: key
+  };
+}
+
+function parseBase64DataUrl(dataUrl: string): { contentType: string; bytes: Uint8Array } | undefined {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return undefined;
+  const binary = atob(match[2]);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return {
+    contentType: match[1],
+    bytes
+  };
+}
+
+function sanitizeFilename(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "image";
+}
