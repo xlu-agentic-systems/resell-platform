@@ -519,6 +519,20 @@ label {
   padding: 8px 10px;
 }
 
+.listing-actions {
+  display: grid;
+  gap: 8px;
+  flex: 0 0 170px;
+}
+
+.listing-edit-form {
+  width: 100%;
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #eef1ec;
+  padding-top: 12px;
+}
+
 .thread {
   width: 100%;
   text-align: left;

@@ -8,6 +8,7 @@ import {
   registerAccount,
   reserveListing,
   sendMessage,
+  updateListingDetails,
   updateListingStatus,
   updateUserProfile,
   updateReservationStatus
@@ -186,6 +187,59 @@ describe("store state transitions", () => {
 
     expect(sold.listings.find((listing) => listing.id === "listing-1")?.status).toBe("sold");
     expect(available).toBe(sold);
+  });
+
+  it("lets owners edit available listing details and images", () => {
+    const next = updateListingDetails(seedState, "listing-1", "seller-1", {
+      ...draft,
+      title: "Updated road bike",
+      price: 460,
+      images: [
+        ...draft.images,
+        {
+          id: "second-image",
+          name: "bike-side.png",
+          dataUrl: "data:image/png;base64,bike-side",
+          primary: false,
+          createdAt: "2026-05-23T10:00:00.000Z"
+        }
+      ]
+    });
+    const listing = next.listings.find((item) => item.id === "listing-1");
+
+    expect(listing?.title).toBe("Updated road bike");
+    expect(listing?.price).toBe(460);
+    expect(listing?.images).toHaveLength(2);
+    expect(listing?.images[0].primary).toBe(true);
+    expect(listing?.images[1].primary).toBe(false);
+  });
+
+  it("prevents non-owners and sold listings from being edited", () => {
+    const nonOwner = updateListingDetails(seedState, "listing-1", "buyer-1", draft);
+    const sold = updateListingStatus(seedState, "listing-1", "seller-1", "sold");
+    const editedSold = updateListingDetails(sold, "listing-1", "seller-1", {
+      ...draft,
+      title: "Should not save"
+    });
+
+    expect(nonOwner).toBe(seedState);
+    expect(editedSold).toBe(sold);
+  });
+
+  it("prevents editing reserved listing details", () => {
+    const copyOnly = updateListingDetails(seedState, "listing-2", "seller-1", {
+      ...draft,
+      title: "Camera kit with extra battery",
+      price: 520
+    });
+    const priceChange = updateListingDetails(seedState, "listing-2", "seller-1", {
+      ...draft,
+      title: "Camera kit with price change",
+      price: 540
+    });
+
+    expect(copyOnly).toBe(seedState);
+    expect(priceChange).toBe(seedState);
   });
 
   it("does not let a seller reserve their own listing", () => {

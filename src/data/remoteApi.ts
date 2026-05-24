@@ -85,6 +85,13 @@ export async function createRemoteListing(draft: ListingDraft): Promise<AppState
   });
 }
 
+export async function updateRemoteListing(listingId: string, draft: ListingDraft): Promise<AppState> {
+  return apiRequest<AppState>(`/api/listings/${encodeURIComponent(listingId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ draft })
+  });
+}
+
 export async function reserveRemoteListing(listingId: string): Promise<AppState> {
   return apiRequest<AppState>("/api/reservations", {
     method: "POST",

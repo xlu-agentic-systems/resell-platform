@@ -138,6 +138,48 @@ describe("App user flows", () => {
     expect(screen.getByLabelText(/status for mirrorless camera kit/i)).toHaveValue("reserved");
   });
 
+  it("lets the local seller edit owned listing details from My listings", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /sell/i }));
+    const deskRow = screen.getByText("Walnut writing desk").closest(".listing-management-row");
+    expect(deskRow).not.toBeNull();
+    fireEvent.click(within(deskRow as HTMLElement).getByRole("button", { name: /edit/i }));
+
+    fireEvent.change(screen.getByLabelText(/edit title for walnut writing desk/i), {
+      target: { value: "Walnut writing desk with riser" }
+    });
+    fireEvent.change(screen.getByLabelText(/edit price for walnut writing desk/i), {
+      target: { value: "210" }
+    });
+    fireEvent.change(screen.getByLabelText(/edit pickup or shipping notes for walnut writing desk/i), {
+      target: { value: "Brooklyn pickup after 6" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /save changes/i })).not.toBeInTheDocument();
+    });
+    expect(screen.getAllByText("Walnut writing desk with riser")).not.toHaveLength(0);
+    expect(screen.getAllByText(/\$210/)).not.toHaveLength(0);
+  });
+
+  it("blocks reserved and sold listing edits", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /sell/i }));
+    const cameraRow = screen.getByText("Mirrorless camera kit").closest(".listing-management-row");
+    expect(cameraRow).not.toBeNull();
+    expect(within(cameraRow as HTMLElement).getByRole("button", { name: /edit/i })).toBeDisabled();
+    expect(screen.getByText(/use picked or chat to mark paid or cancel/i)).toBeInTheDocument();
+
+    const deskStatus = screen.getByLabelText(/status for walnut writing desk/i);
+    fireEvent.change(deskStatus, { target: { value: "sold" } });
+    const soldDeskRow = screen.getByText("Walnut writing desk").closest(".listing-management-row");
+    expect(soldDeskRow).not.toBeNull();
+    expect(within(soldDeskRow as HTMLElement).getByRole("button", { name: /edit/i })).toBeDisabled();
+  });
+
   it("keeps browse public in Cloudflare mode when the visitor is logged out", async () => {
     mockCloudflareSession(null);
 
@@ -190,6 +232,31 @@ describe("App user flows", () => {
     expect(screen.queryByPlaceholderText(/write a message/i)).not.toBeInTheDocument();
   });
 
+  it("submits owned listing edits to the Cloudflare listing endpoint", async () => {
+    const fetchMock = mockCloudflareSession(seedState.users[0], cloudflarePublicState(seedState.users[0]));
+
+    render(<App />);
+
+    await screen.findAllByText("Cloudflare D1");
+    fireEvent.click(within(screen.getByLabelText(/primary navigation/i)).getByRole("button", { name: /sell/i }));
+    const deskRow = await screen.findByText("Walnut writing desk");
+    fireEvent.click(within(deskRow.closest(".listing-management-row") as HTMLElement).getByRole("button", { name: /edit/i }));
+    fireEvent.change(screen.getByLabelText(/edit title for walnut writing desk/i), {
+      target: { value: "Walnut writing desk with riser" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/listings/listing-1",
+        expect.objectContaining({
+          method: "PATCH",
+          body: expect.stringContaining("Walnut writing desk with riser")
+        })
+      );
+    });
+  });
+
   it("does not fall back to local demo actions in production when the Cloudflare API fails", async () => {
     vi.stubEnv("DEV", false);
     vi.stubGlobal(
@@ -217,6 +284,9 @@ function mockCloudflareSession(user: User | null, state: AppState = cloudflarePu
       return jsonResponse({ user });
     }
     if (path.endsWith("/api/state")) {
+      return jsonResponse(state);
+    }
+    if (path.includes("/api/listings/") && init?.method === "PATCH") {
       return jsonResponse(state);
     }
     return jsonResponse({ error: "Unexpected test request" }, 500);

@@ -23,6 +23,7 @@ import {
   resetState,
   saveState,
   sendMessage,
+  updateListingDetails,
   updateListingStatus,
   updateReservationStatus
 } from "./data/store";
@@ -35,6 +36,7 @@ import {
   requestRemoteEmailCode,
   reserveRemoteListing,
   sendRemoteMessage,
+  updateRemoteListing,
   updateRemoteListingStatus,
   updateRemoteProfile,
   updateRemoteReservationStatus,
@@ -60,6 +62,21 @@ const blankDraft: ListingDraft = {
   location: "",
   images: []
 };
+
+function listingToDraft(listing: Listing): ListingDraft {
+  return {
+    title: listing.title,
+    description: listing.description,
+    price: listing.price,
+    category: listing.category,
+    condition: listing.condition,
+    location: listing.location,
+    images: listing.images.map((image, index) => ({
+      ...image,
+      primary: index === 0
+    }))
+  };
+}
 
 const emptyCloudState: AppState = {
   users: [],
@@ -256,6 +273,22 @@ export default function App() {
     update(updateListingStatus(state, listingId, activeUser?.id ?? "", status));
   }
 
+  async function handleUpdateListing(listingId: string, draft: ListingDraft): Promise<boolean> {
+    if (dataSource === "cloudflare") {
+      if (!sessionUser) {
+        promptLogin("Log in with email to manage your listings.");
+        return false;
+      }
+      await runRemoteAction(() => updateRemoteListing(listingId, draft));
+      return true;
+    }
+
+    const next = updateListingDetails(state, listingId, activeUser?.id ?? "", draft);
+    if (next === state) return false;
+    update(next);
+    return true;
+  }
+
   return (
     <div className="app">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -370,6 +403,7 @@ export default function App() {
           <SellView
             activeUser={activeUser}
             onCreate={handleCreateListing}
+            onUpdate={handleUpdateListing}
             listings={state.listings}
             reservations={state.reservations}
             updateStatus={handleUpdateListingStatus}
@@ -756,21 +790,41 @@ function ListingGallery({ listing }: { listing: Listing }) {
 function SellView({
   activeUser,
   onCreate,
+  onUpdate,
   listings,
   reservations,
   updateStatus
 }: {
   activeUser: User | null;
   onCreate: (draft: ListingDraft) => Promise<boolean> | boolean;
+  onUpdate: (listingId: string, draft: ListingDraft) => Promise<boolean> | boolean;
   listings: Listing[];
   reservations: Reservation[];
   updateStatus: (listingId: string, status: Exclude<ListingStatus, "reserved">) => void;
 }) {
   const [draft, setDraft] = useState<ListingDraft>(blankDraft);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<ListingDraft | null>(null);
   const [uploadError, setUploadError] = useState("");
+  const [editUploadError, setEditUploadError] = useState("");
+  const [editError, setEditError] = useState("");
   const sellerListings = activeUser ? listings.filter((listing) => listing.sellerId === activeUser.id) : [];
   const canPublish =
     draft.title.trim() && draft.description.trim() && draft.price > 0 && draft.location.trim() && draft.images.length > 0;
+  const editingListing = sellerListings.find((listing) => listing.id === editingId);
+  const canSaveEdit = Boolean(
+    editDraft &&
+    editingListing &&
+    editingListing.status !== "sold" &&
+    editingListing.status !== "reserved" &&
+    editDraft.title.trim() &&
+    editDraft.description.trim() &&
+    editDraft.category.trim() &&
+    editDraft.price > 0 &&
+    editDraft.location.trim() &&
+    editDraft.images.length > 0 &&
+    editDraft.images.length <= 6
+  );
 
   async function handleFiles(files: FileList | null) {
     if (!files) return;
@@ -789,6 +843,46 @@ function SellView({
       setDraft({ ...draft, images: [...draft.images, ...images] });
     } catch {
       setUploadError("One image could not be read. Try a different file.");
+    }
+  }
+
+  async function handleEditFiles(files: FileList | null) {
+    if (!files || !editDraft) return;
+    setEditUploadError("");
+    const rejected = Array.from(files).filter(
+      (file) => !file.type.startsWith("image/") || file.size > MAX_IMAGE_BYTES
+    );
+    const accepted = Array.from(files)
+      .filter((file) => file.type.startsWith("image/") && file.size <= MAX_IMAGE_BYTES)
+      .slice(0, Math.max(0, 6 - editDraft.images.length));
+    if (rejected.length > 0) {
+      setEditUploadError("Use image files under 2 MB.");
+    }
+    try {
+      const images = await Promise.all(accepted.map(readImage));
+      setEditDraft({ ...editDraft, images: [...editDraft.images, ...images] });
+    } catch {
+      setEditUploadError("One image could not be read. Try a different file.");
+    }
+  }
+
+  function startEditing(listing: Listing) {
+    if (listing.status === "sold" || listing.status === "reserved") return;
+    setEditingId(listing.id);
+    setEditDraft(listingToDraft(listing));
+    setEditError("");
+    setEditUploadError("");
+  }
+
+  async function saveEdit() {
+    if (!editingId || !editDraft || !canSaveEdit) return;
+    setEditError("");
+    const saved = await onUpdate(editingId, editDraft);
+    if (saved) {
+      setEditingId(null);
+      setEditDraft(null);
+    } else {
+      setEditError("This listing could not be updated.");
     }
   }
 
@@ -916,30 +1010,162 @@ function SellView({
                   <p className="muted">Reserved. Use Picked or Chat to mark paid or cancel.</p>
                 )}
               </div>
-              <label className="status-control">
-                <span>Status</span>
-                <select
-                  aria-label={`Status for ${listing.title}`}
-                  value={selectableStatus}
-                  disabled={Boolean(activeReservation) || isTerminal}
-                  onChange={(event) =>
-                    updateStatus(listing.id, event.target.value as Exclude<ListingStatus, "reserved">)
-                  }
+              <div className="listing-actions">
+                <label className="status-control">
+                  <span>Status</span>
+                  <select
+                    aria-label={`Status for ${listing.title}`}
+                    value={selectableStatus}
+                    disabled={Boolean(activeReservation) || isTerminal}
+                    onChange={(event) =>
+                      updateStatus(listing.id, event.target.value as Exclude<ListingStatus, "reserved">)
+                    }
+                  >
+                    {listing.status === "reserved" && (
+                      <option value="reserved" disabled>
+                        Reserved
+                      </option>
+                    )}
+                    <option value="available">Available</option>
+                    <option value="paused">Paused</option>
+                    <option value="sold">Sold</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={isTerminal || Boolean(activeReservation)}
+                  onClick={() => startEditing(listing)}
                 >
-                  {listing.status === "reserved" && (
-                    <option value="reserved" disabled>
-                      Reserved
-                    </option>
-                  )}
-                  <option value="available">
-                    Available
-                  </option>
-                  <option value="paused">
-                    Paused
-                  </option>
-                  <option value="sold">Sold</option>
-                </select>
-              </label>
+                  Edit
+                </button>
+              </div>
+              {editingId === listing.id && editDraft && (
+                <form
+                  className="listing-edit-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    saveEdit();
+                  }}
+                >
+                  <label>
+                    <span>Images</span>
+                    <input
+                      className="file-input"
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={(event) => handleEditFiles(event.target.files)}
+                    />
+                  </label>
+                  <div className="upload-strip">
+                    {editDraft.images.map((image) => (
+                      <button
+                        type="button"
+                        key={image.id}
+                        onClick={() =>
+                          setEditDraft({
+                            ...editDraft,
+                            images: editDraft.images.filter((item) => item.id !== image.id)
+                          })
+                        }
+                      >
+                        <img src={image.dataUrl} alt="" />
+                      </button>
+                    ))}
+                    {editDraft.images.length === 0 && (
+                      <div className="empty-upload">
+                        <ImagePlus size={26} />
+                        <span>Add 1-6 images</span>
+                      </div>
+                    )}
+                  </div>
+                  {editUploadError && <p className="form-error">{editUploadError}</p>}
+                  <div className="field-grid">
+                    <label>
+                      <span>Title</span>
+                      <input
+                        aria-label={`Edit title for ${listing.title}`}
+                        value={editDraft.title}
+                        onChange={(event) => setEditDraft({ ...editDraft, title: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>Price</span>
+                      <input
+                        aria-label={`Edit price for ${listing.title}`}
+                        type="number"
+                        min="1"
+                        value={editDraft.price || ""}
+                        onChange={(event) => setEditDraft({ ...editDraft, price: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      <span>Category</span>
+                      <select
+                        aria-label={`Edit category for ${listing.title}`}
+                        value={editDraft.category}
+                        onChange={(event) => setEditDraft({ ...editDraft, category: event.target.value })}
+                      >
+                        <option>Furniture</option>
+                        <option>Electronics</option>
+                        <option>Clothing</option>
+                        <option>Home</option>
+                        <option>Outdoor</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Condition</span>
+                      <select
+                        aria-label={`Edit condition for ${listing.title}`}
+                        value={editDraft.condition}
+                        onChange={(event) =>
+                          setEditDraft({ ...editDraft, condition: event.target.value as ListingDraft["condition"] })
+                        }
+                      >
+                        <option value="new">New</option>
+                        <option value="like_new">Like new</option>
+                        <option value="good">Good</option>
+                        <option value="fair">Fair</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label>
+                    <span>Pickup or shipping notes</span>
+                    <input
+                      aria-label={`Edit pickup or shipping notes for ${listing.title}`}
+                      value={editDraft.location}
+                      onChange={(event) => setEditDraft({ ...editDraft, location: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>Description</span>
+                    <textarea
+                      aria-label={`Edit description for ${listing.title}`}
+                      value={editDraft.description}
+                      onChange={(event) => setEditDraft({ ...editDraft, description: event.target.value })}
+                      rows={4}
+                    />
+                  </label>
+                  {editError && <p className="form-error">{editError}</p>}
+                  <div className="button-row">
+                    <button className="primary" disabled={!canSaveEdit}>
+                      Save changes
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => {
+                        setEditingId(null);
+                        setEditDraft(null);
+                        setEditError("");
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
             </div>
           );
         })}
