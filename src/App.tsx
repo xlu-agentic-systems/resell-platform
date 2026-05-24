@@ -185,6 +185,24 @@ export default function App() {
     setAuthMessage(message);
   }
 
+  function openReservationChat(reservationId: string) {
+    if (dataSource === "cloudflare" && !sessionUser) {
+      promptLogin("Log in with email to chat about picked items.");
+      return;
+    }
+    setSelectedReservationId(reservationId);
+    setView("chat");
+  }
+
+  function openReservationOrder(reservationId: string) {
+    if (dataSource === "cloudflare" && !sessionUser) {
+      promptLogin("Log in with email to see your picked items.");
+      return;
+    }
+    setSelectedReservationId(reservationId);
+    setView("orders");
+  }
+
   function openProtectedView(nextView: View, message: string) {
     if (dataSource === "cloudflare" && !sessionUser) {
       promptLogin(message);
@@ -406,7 +424,15 @@ export default function App() {
             onUpdate={handleUpdateListing}
             listings={state.listings}
             reservations={state.reservations}
+            userNameFor={(userId) => getUserName(state, userId)}
+            openChat={openReservationChat}
+            openOrder={openReservationOrder}
             updateStatus={handleUpdateListingStatus}
+            updateReservation={(reservationId, status) =>
+              dataSource === "cloudflare"
+                ? runRemoteAction(() => updateRemoteReservationStatus(reservationId, status))
+                : update(updateReservationStatus(state, reservationId, activeUser?.id ?? "", status))
+            }
           />
         )}
         {view === "orders" && !(dataSource === "cloudflare" && !sessionUser) && (
@@ -414,14 +440,8 @@ export default function App() {
             state={state}
             reservations={userReservations}
             activeUserId={activeUser?.id ?? ""}
-            openChat={(id) => {
-              if (dataSource === "cloudflare" && !sessionUser) {
-                promptLogin("Log in with email to chat about picked items.");
-                return;
-              }
-              setSelectedReservationId(id);
-              setView("chat");
-            }}
+            selectedReservationId={selectedReservation?.id}
+            openChat={openReservationChat}
             updateStatus={(reservationId, status) =>
               dataSource === "cloudflare"
                 ? runRemoteAction(() => updateRemoteReservationStatus(reservationId, status))
@@ -793,14 +813,22 @@ function SellView({
   onUpdate,
   listings,
   reservations,
-  updateStatus
+  userNameFor,
+  openChat,
+  openOrder,
+  updateStatus,
+  updateReservation
 }: {
   activeUser: User | null;
   onCreate: (draft: ListingDraft) => Promise<boolean> | boolean;
   onUpdate: (listingId: string, draft: ListingDraft) => Promise<boolean> | boolean;
   listings: Listing[];
   reservations: Reservation[];
+  userNameFor: (userId: string) => string;
+  openChat: (reservationId: string) => void;
+  openOrder: (reservationId: string) => void;
   updateStatus: (listingId: string, status: Exclude<ListingStatus, "reserved">) => void;
+  updateReservation: (reservationId: string, status: Reservation["status"]) => void;
 }) {
   const [draft, setDraft] = useState<ListingDraft>(blankDraft);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -1007,7 +1035,42 @@ function SellView({
                 <p className="muted">${listing.price} · Updated {new Date(listing.updatedAt).toLocaleDateString()}</p>
                 <span className={`badge ${listing.status}`}>{listing.status}</span>
                 {activeReservation && (
-                  <p className="muted">Reserved. Use Picked or Chat to mark paid or cancel.</p>
+                  <div className="reservation-context">
+                    <div>
+                      <p className="muted">Reserved. Use Picked or Chat to mark paid or cancel.</p>
+                      <p>
+                        Buyer {userNameFor(activeReservation.buyerId)} · Due{" "}
+                        {new Date(activeReservation.paymentDueAt).toLocaleString()}
+                      </p>
+                    </div>
+                    <span className={`badge ${activeReservation.status}`}>
+                      {activeReservation.status.replace("_", " ")}
+                    </span>
+                    <div className="button-row reservation-shortcuts">
+                      <button type="button" className="secondary" onClick={() => openChat(activeReservation.id)}>
+                        <MessageSquare size={16} />
+                        Open chat
+                      </button>
+                      <button type="button" className="secondary" onClick={() => openOrder(activeReservation.id)}>
+                        <ShoppingBag size={16} />
+                        Open picked item
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => updateReservation(activeReservation.id, "paid")}
+                      >
+                        Mark paid
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => updateReservation(activeReservation.id, "cancelled")}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
               <div className="listing-actions">
@@ -1179,12 +1242,14 @@ function OrdersView({
   state,
   reservations,
   activeUserId,
+  selectedReservationId,
   openChat,
   updateStatus
 }: {
   state: AppState;
   reservations: Reservation[];
   activeUserId: string;
+  selectedReservationId?: string;
   openChat: (id: string) => void;
   updateStatus: (reservationId: string, status: Reservation["status"]) => void;
 }) {
@@ -1202,7 +1267,10 @@ function OrdersView({
             const listing = state.listings.find((item) => item.id === reservation.listingId);
             const isSeller = reservation.sellerId === activeUserId;
             return (
-              <article className="order-card" key={reservation.id}>
+              <article
+                className={reservation.id === selectedReservationId ? "order-card active-order" : "order-card"}
+                key={reservation.id}
+              >
                 <img src={listing ? getPrimaryImage(listing) : undefined} alt="" />
                 <div>
                   <span className={`badge ${reservation.status}`}>{reservation.status.replace("_", " ")}</span>
