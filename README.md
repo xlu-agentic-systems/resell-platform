@@ -36,16 +36,18 @@ npm run build
 
 - Seller can publish listings with 1-6 uploaded images.
 - Buyers can browse listings, reserve an available item, and open a reservation-scoped chat with the seller.
+- Cloudflare mode supports email-code account login, HttpOnly session cookies, editable profiles, and email/phone trust badge fields.
 - The app does not process payments. It tracks off-platform payment status only.
 - Payment is due 24 hours after reservation. The app creates one buyer notification and one seller notification when an unpaid reservation becomes overdue.
-- Demo users can be switched from the left navigation on desktop. Mobile uses a bottom navigation for core workflows.
+- Plain local demo users can be switched from the left navigation on desktop. Cloudflare mode uses account login instead.
 
 ## Current Limits
 
 - `npm run dev` still uses browser `localStorage`; use `npm run dev:cloudflare` to exercise D1.
+- Email-code delivery is currently a development shim: localhost can return the code, while production omits it and logs the code server-side until a transactional email provider is wired in.
 - Seed demo images are stored as data URLs for portability. New Cloudflare listing uploads are written to R2 and D1 stores the served image path plus R2 key.
 - Overdue monitoring runs when `/api/state` is called. A production scheduled Worker should be added before relying on background notifications.
-- There is no real authentication, moderation, payment provider, or user signup yet.
+- There is no moderation, payment provider, or production SMS provider yet. Phone verification is modeled as an optional trust badge field.
 
 ## Cloudflare Deployment
 
@@ -86,8 +88,9 @@ npm run deploy
 
 ## Cloudflare Architecture
 
-- D1 stores users, listings, listing image metadata, reservations, chat messages, and notifications.
-- Pages Functions expose `/api/state`, `/api/listings`, `/api/reservations`, `/api/messages`, reservation status updates, and notification read actions.
+- D1 stores profiles, auth challenges, auth sessions, listings, listing image metadata, reservations, chat messages, and notifications.
+- Pages Functions expose email-code auth, `/api/me`, `/api/state`, `/api/listings`, `/api/reservations`, `/api/messages`, reservation status updates, and notification read actions.
+- Protected mutations derive the actor from the HttpOnly session cookie instead of trusting browser-submitted user IDs.
 - Reservation creation updates listing availability in D1 with a conditional update, so a second buyer cannot reserve the same available item.
 - Chat writes messages to D1 after checking the sender is the reservation buyer or seller.
 - When the `LISTING_IMAGES` R2 binding is configured, new listing uploads store image bytes in R2 and D1 stores the served image path plus R2 key.
