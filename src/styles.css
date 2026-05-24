@@ -525,6 +525,22 @@ label {
   flex: 0 0 170px;
 }
 
+.reservation-context {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #eef1ec;
+}
+
+.reservation-context p {
+  margin: 0;
+}
+
+.reservation-shortcuts {
+  align-items: center;
+}
+
 .listing-edit-form {
   width: 100%;
   display: grid;
@@ -541,6 +557,11 @@ label {
 .active-thread {
   border-color: #176b5b;
   background: #eef8f4;
+}
+
+.active-order {
+  border-color: #176b5b;
+  box-shadow: 0 0 0 2px rgba(23, 107, 91, 0.12);
 }
 
 .orders,

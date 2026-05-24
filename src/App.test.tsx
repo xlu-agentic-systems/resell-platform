@@ -180,6 +180,56 @@ describe("App user flows", () => {
     expect(within(soldDeskRow as HTMLElement).getByRole("button", { name: /edit/i })).toBeDisabled();
   });
 
+  it("links a local seller's reserved listing to chat and picked workflow", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /sell/i }));
+    const cameraRow = screen.getByText("Mirrorless camera kit").closest(".listing-management-row");
+    expect(cameraRow).not.toBeNull();
+
+    expect(within(cameraRow as HTMLElement).getByText(/buyer jordan lee/i)).toBeInTheDocument();
+    expect(within(cameraRow as HTMLElement).getByText(/overdue/i)).toBeInTheDocument();
+
+    fireEvent.click(within(cameraRow as HTMLElement).getByRole("button", { name: /open chat/i }));
+    expect(screen.getByRole("heading", { name: "Mirrorless camera kit" })).toBeInTheDocument();
+    expect(screen.getByText(/i can pay today/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /sell/i }));
+    const refreshedCameraRow = screen.getByText("Mirrorless camera kit").closest(".listing-management-row");
+    expect(refreshedCameraRow).not.toBeNull();
+    fireEvent.click(within(refreshedCameraRow as HTMLElement).getByRole("button", { name: /open picked item/i }));
+
+    expect(screen.getByRole("heading", { name: /reservations and manual payment/i })).toBeInTheDocument();
+    expect(screen.getByText(/buyer jordan lee/i)).toBeInTheDocument();
+    expect(document.querySelector(".active-order")).toHaveTextContent("Mirrorless camera kit");
+  });
+
+  it("lets the local seller mark a reserved listing paid from My listings", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /sell/i }));
+    const cameraRow = screen.getByText("Mirrorless camera kit").closest(".listing-management-row");
+    expect(cameraRow).not.toBeNull();
+
+    fireEvent.click(within(cameraRow as HTMLElement).getByRole("button", { name: /mark paid/i }));
+
+    expect(screen.getByLabelText(/status for mirrorless camera kit/i)).toHaveValue("sold");
+    expect(screen.queryByText(/buyer jordan lee/i)).not.toBeInTheDocument();
+  });
+
+  it("lets the local seller cancel a reserved listing from My listings", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /sell/i }));
+    const cameraRow = screen.getByText("Mirrorless camera kit").closest(".listing-management-row");
+    expect(cameraRow).not.toBeNull();
+
+    fireEvent.click(within(cameraRow as HTMLElement).getByRole("button", { name: /^cancel$/i }));
+
+    expect(screen.getByLabelText(/status for mirrorless camera kit/i)).toHaveValue("available");
+    expect(screen.queryByText(/buyer jordan lee/i)).not.toBeInTheDocument();
+  });
+
   it("keeps browse public in Cloudflare mode when the visitor is logged out", async () => {
     mockCloudflareSession(null);
 
@@ -257,6 +307,55 @@ describe("App user flows", () => {
     });
   });
 
+  it("shows Cloudflare seller reservation shortcuts without extra backend calls", async () => {
+    const fetchMock = mockCloudflareSession(seedState.users[0], cloudflarePublicState(seedState.users[0]));
+
+    render(<App />);
+
+    await screen.findAllByText("Cloudflare D1");
+    fireEvent.click(within(screen.getByLabelText(/primary navigation/i)).getByRole("button", { name: /sell/i }));
+    const cameraRow = (await screen.findByText("Mirrorless camera kit")).closest(".listing-management-row");
+    expect(cameraRow).not.toBeNull();
+    expect(within(cameraRow as HTMLElement).getByText(/buyer jordan lee/i)).toBeInTheDocument();
+
+    fireEvent.click(within(cameraRow as HTMLElement).getByRole("button", { name: /open picked item/i }));
+
+    expect(screen.getByRole("heading", { name: /reservations and manual payment/i })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(within(screen.getByLabelText(/primary navigation/i)).getByRole("button", { name: /sell/i }));
+    const refreshedCameraRow = screen.getByText("Mirrorless camera kit").closest(".listing-management-row");
+    expect(refreshedCameraRow).not.toBeNull();
+    fireEvent.click(within(refreshedCameraRow as HTMLElement).getByRole("button", { name: /open chat/i }));
+
+    expect(screen.getByRole("heading", { name: "Mirrorless camera kit" })).toBeInTheDocument();
+    expect(screen.getByText(/i can pay today/i)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("submits Cloudflare seller reservation actions from My listings", async () => {
+    const fetchMock = mockCloudflareSession(seedState.users[0], cloudflarePublicState(seedState.users[0]));
+
+    render(<App />);
+
+    await screen.findAllByText("Cloudflare D1");
+    fireEvent.click(within(screen.getByLabelText(/primary navigation/i)).getByRole("button", { name: /sell/i }));
+    const cameraRow = (await screen.findByText("Mirrorless camera kit")).closest(".listing-management-row");
+    expect(cameraRow).not.toBeNull();
+
+    fireEvent.click(within(cameraRow as HTMLElement).getByRole("button", { name: /mark paid/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/reservations/reservation-1/status",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ status: "paid" })
+        })
+      );
+    });
+  });
+
   it("does not fall back to local demo actions in production when the Cloudflare API fails", async () => {
     vi.stubEnv("DEV", false);
     vi.stubGlobal(
@@ -287,6 +386,9 @@ function mockCloudflareSession(user: User | null, state: AppState = cloudflarePu
       return jsonResponse(state);
     }
     if (path.includes("/api/listings/") && init?.method === "PATCH") {
+      return jsonResponse(state);
+    }
+    if (path.includes("/api/reservations/") && path.endsWith("/status") && init?.method === "POST") {
       return jsonResponse(state);
     }
     return jsonResponse({ error: "Unexpected test request" }, 500);
