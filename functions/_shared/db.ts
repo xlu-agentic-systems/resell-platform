@@ -15,6 +15,7 @@ import { ApiError } from "./http";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TERMINAL_RESERVATION_STATUSES = new Set<ReservationStatus>(["paid", "sold", "cancelled"]);
 const OWNER_LISTING_STATUSES = new Set<ListingStatus>(["available", "paused", "sold"]);
+const LISTING_CONDITIONS = new Set<Listing["condition"]>(["new", "like_new", "good", "fair"]);
 
 export type Env = {
   DB: D1Database;
@@ -53,6 +54,7 @@ type ListingImageRow = {
   listing_id: string;
   name: string;
   data_url: string;
+  r2_key?: string | null;
   is_primary: number;
   created_at: string;
 };
@@ -215,12 +217,7 @@ export async function createListingInDb(env: Env, sellerId: string, draft: Listi
   if (!seller) {
     throw new ApiError("Log in to create listings.", 401);
   }
-  if (!draft.title.trim() || !draft.description.trim() || !draft.location.trim() || draft.price <= 0) {
-    throw new ApiError("Listing title, description, location, and price are required.");
-  }
-  if (draft.images.length === 0 || draft.images.length > 6) {
-    throw new ApiError("Listings must include 1-6 images.");
-  }
+  validateListingDraft(draft);
 
   const now = new Date().toISOString();
   const listingId = createId("listing");
@@ -246,6 +243,85 @@ export async function createListingInDb(env: Env, sellerId: string, draft: Listi
         now,
         now
       ),
+    ...images.map((image) =>
+      db
+        .prepare(
+          `INSERT INTO listing_images (id, listing_id, name, data_url, r2_key, is_primary, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          image.id,
+          listingId,
+          image.name,
+          image.dataUrl,
+          image.r2Key ?? null,
+          image.primary ? 1 : 0,
+          now
+        )
+    )
+  ]);
+}
+
+export async function updateListingInDb(env: Env, listingId: string, sellerId: string, draft: ListingDraft) {
+  const db = env.DB;
+  validateListingDraft(draft);
+
+  const listing = await db
+    .prepare("SELECT * FROM listings WHERE id = ? AND seller_id = ?")
+    .bind(listingId, sellerId)
+    .first<ListingRow>();
+  if (!listing) throw new ApiError("Listing not found for this seller.", 404);
+  if (listing.status === "sold") {
+    throw new ApiError("Sold listings cannot be edited.", 409);
+  }
+  if (listing.status === "reserved") {
+    throw new ApiError("Resolve the active reservation before editing this listing.", 409);
+  }
+
+  const now = new Date().toISOString();
+  const images = await Promise.all(
+    draft.images.map((image, index) => persistListingImage(env, listingId, image, index === 0, now))
+  );
+  const result = await db
+    .prepare(
+      `UPDATE listings
+       SET title = ?,
+           description = ?,
+           price = ?,
+           category = ?,
+           condition = ?,
+           location = ?,
+           updated_at = ?
+       WHERE id = ?
+         AND seller_id = ?
+         AND status IN ('available', 'paused')
+         AND NOT EXISTS (
+           SELECT 1
+           FROM reservations
+           WHERE listing_id = ?
+             AND status IN ('requested', 'awaiting_payment', 'payment_sent', 'overdue')
+         )`
+    )
+    .bind(
+      draft.title.trim(),
+      draft.description.trim(),
+      draft.price,
+      draft.category.trim(),
+      draft.condition,
+      draft.location.trim(),
+      now,
+      listingId,
+      sellerId,
+      listingId
+    )
+    .run();
+
+  if (!result.meta.changes) {
+    throw new ApiError("Resolve the active reservation before editing this listing.", 409);
+  }
+
+  await db.batch([
+    db.prepare("DELETE FROM listing_images WHERE listing_id = ?").bind(listingId),
     ...images.map((image) =>
       db
         .prepare(
@@ -512,6 +588,25 @@ async function getReservationForParticipant(db: D1Database, reservationId: strin
 async function getUserName(db: D1Database, userId: string) {
   const user = await db.prepare("SELECT name FROM users WHERE id = ?").bind(userId).first<{ name: string }>();
   return user?.name ?? "Someone";
+}
+
+function validateListingDraft(draft: ListingDraft) {
+  if (
+    !draft.title.trim() ||
+    !draft.description.trim() ||
+    !draft.location.trim() ||
+    !draft.category.trim() ||
+    !Number.isFinite(draft.price) ||
+    draft.price <= 0
+  ) {
+    throw new ApiError("Listing title, description, location, category, and price are required.");
+  }
+  if (!LISTING_CONDITIONS.has(draft.condition)) {
+    throw new ApiError("Listing condition is invalid.");
+  }
+  if (draft.images.length === 0 || draft.images.length > 6) {
+    throw new ApiError("Listings must include 1-6 images.");
+  }
 }
 
 async function persistListingImage(

@@ -25,6 +25,7 @@ const ACTIVE_RESERVATION_STATUSES: Reservation["status"][] = [
   "payment_sent",
   "overdue"
 ];
+const LISTING_CONDITIONS = new Set(["new", "like_new", "good", "fair"]);
 
 const stateResource = createLocalStorageResource<AppState>({
   key: STORAGE_KEY,
@@ -56,6 +57,20 @@ export function resetState(): AppState {
 
 export function getPrimaryImage(listing: Listing): string | undefined {
   return listing.images.find((image) => image.primary)?.dataUrl ?? listing.images[0]?.dataUrl;
+}
+
+function isValidListingDraft(draft: ListingDraft): boolean {
+  return (
+    draft.title.trim().length > 0 &&
+    draft.description.trim().length > 0 &&
+    draft.location.trim().length > 0 &&
+    draft.category.trim().length > 0 &&
+    Number.isFinite(draft.price) &&
+    draft.price > 0 &&
+    LISTING_CONDITIONS.has(draft.condition) &&
+    draft.images.length >= 1 &&
+    draft.images.length <= 6
+  );
 }
 
 export function normalizeEmail(email: string): string {
@@ -277,6 +292,42 @@ export function updateListingStatus(
     ...state,
     listings: state.listings.map((item) =>
       item.id === listingId ? { ...item, status, updatedAt: now } : item
+    )
+  };
+}
+
+export function updateListingDetails(
+  state: AppState,
+  listingId: string,
+  sellerId: string,
+  draft: ListingDraft
+): AppState {
+  const listing = state.listings.find((item) => item.id === listingId);
+  if (!listing || listing.sellerId !== sellerId || listing.status === "sold" || listing.status === "reserved") {
+    return state;
+  }
+  if (!isValidListingDraft(draft)) return state;
+
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    listings: state.listings.map((item) =>
+      item.id === listingId
+        ? {
+            ...item,
+            title: draft.title.trim(),
+            description: draft.description.trim(),
+            price: draft.price,
+            category: draft.category.trim(),
+            condition: draft.condition,
+            location: draft.location.trim(),
+            updatedAt: now,
+            images: draft.images.map((image, index) => ({
+              ...image,
+              primary: index === 0
+            }))
+          }
+        : item
     )
   };
 }
