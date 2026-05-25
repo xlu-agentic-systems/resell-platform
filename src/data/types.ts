@@ -1,4 +1,6 @@
 export type UserRole = "buyer" | "seller";
+export type ModerationStatus = "pending" | "approved" | "rejected" | "flagged";
+export type TrustBadge = "email_verified" | "phone_verified" | "profile_complete";
 
 export type User = {
   id: string;
@@ -9,6 +11,7 @@ export type User = {
   pickupArea?: string;
   bio?: string;
   avatarUrl?: string;
+  trustBadges?: TrustBadge[];
 };
 
 export type AccountStatus = "active" | "disabled";
@@ -56,6 +59,7 @@ export type Listing = {
   location: string;
   images: ListingImage[];
   status: ListingStatus;
+  moderationStatus?: ModerationStatus;
   createdAt: string;
   updatedAt: string;
 };

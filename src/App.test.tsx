@@ -116,6 +116,16 @@ describe("App user flows", () => {
     }
   });
 
+  it("switches the main web interface between English and Mandarin", () => {
+    render(<App />);
+
+    fireEvent.change(screen.getAllByLabelText(/language/i)[0], { target: { value: "zh" } });
+
+    expect(screen.getByRole("button", { name: /浏览/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /出售/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /从本地卖家处选购商品/i })).toBeInTheDocument();
+  });
+
   it("lets the local seller manage listing status from My listings", () => {
     render(<App />);
 
@@ -356,6 +366,27 @@ describe("App user flows", () => {
     });
   });
 
+  it("exports authenticated Cloudflare user data", async () => {
+    const createObjectURL = vi.fn(() => "blob:export");
+    const revokeObjectURL = vi.fn();
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    const fetchMock = mockCloudflareSession(seedState.users[0], cloudflarePublicState(seedState.users[0]));
+
+    render(<App />);
+
+    await screen.findAllByText("Cloudflare D1");
+    fireEvent.click(screen.getAllByRole("button", { name: /export data/i })[0]);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/export",
+        expect.objectContaining({ credentials: "include" })
+      );
+    });
+    expect(createObjectURL).toHaveBeenCalled();
+  });
+
   it("does not fall back to local demo actions in production when the Cloudflare API fails", async () => {
     vi.stubEnv("DEV", false);
     vi.stubGlobal(
@@ -384,6 +415,22 @@ function mockCloudflareSession(user: User | null, state: AppState = cloudflarePu
     }
     if (path.endsWith("/api/state")) {
       return jsonResponse(state);
+    }
+    if (path.endsWith("/api/export")) {
+      return jsonResponse({
+        formatVersion: 1,
+        exportedAt: "2026-05-25T00:00:00.000Z",
+        architecture: {
+          backend: [],
+          businessModels: [],
+          frontends: [],
+          adapters: []
+        },
+        user,
+        trustBadges: ["email_verified"],
+        moderationStatuses: ["pending", "approved", "rejected", "flagged"],
+        state
+      });
     }
     if (path.includes("/api/listings/") && init?.method === "PATCH") {
       return jsonResponse(state);
