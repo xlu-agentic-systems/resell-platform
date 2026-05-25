@@ -107,13 +107,53 @@ describe("App user flows", () => {
   });
 
   it("keeps the primary mobile navigation visible in the rendered shell", () => {
-    render(<App />);
+    const { container } = render(<App />);
 
     const navigation = screen.getByLabelText(/primary navigation/i);
 
     for (const label of ["Browse", "Sell", "Picked", "Chat"]) {
       expect(within(navigation).getByRole("button", { name: new RegExp(label, "i") })).toBeInTheDocument();
     }
+    expect(container.querySelector(".mobile-app-header .brand-mark")).toHaveAttribute("src", "/brand/icon-192.png");
+  });
+
+  it("keeps publish and edit listing workflows available for a mobile viewport", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+    window.dispatchEvent(new Event("resize"));
+    const { container } = render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /sell/i }));
+    fireEvent.change(screen.getByLabelText(/images/i), {
+      target: { files: [new File(["mobile"], "mobile.png", { type: "image/png" })] }
+    });
+    await waitFor(() => {
+      expect(container.querySelectorAll(".upload-strip img")).toHaveLength(1);
+    });
+    fireEvent.change(screen.getByLabelText(/title/i), { target: { value: "Mobile floor lamp" } });
+    fireEvent.change(screen.getByLabelText(/price/i), { target: { value: "45" } });
+    fireEvent.change(screen.getByLabelText(/pickup or shipping notes/i), {
+      target: { value: "Lobby pickup" }
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "Slim lamp tested from a phone-sized layout." }
+    });
+    fireEvent.click(screen.getByRole("button", { name: /publish listing/i }));
+
+    expect(await screen.findAllByRole("heading", { name: "Mobile floor lamp" })).not.toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /sell/i }));
+    const deskRow = screen.getByText("Walnut writing desk").closest(".listing-management-row");
+    expect(deskRow).not.toBeNull();
+    fireEvent.click(within(deskRow as HTMLElement).getByRole("button", { name: /edit/i }));
+    fireEvent.change(screen.getByLabelText(/edit price for walnut writing desk/i), {
+      target: { value: "199" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /save changes/i })).not.toBeInTheDocument();
+    });
+    expect(screen.getAllByText(/\$199/)).not.toHaveLength(0);
   });
 
   it("switches the main web interface between English and Mandarin", () => {

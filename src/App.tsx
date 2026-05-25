@@ -10,7 +10,6 @@ import {
   Search,
   Share2,
   ShoppingBag,
-  Store,
   Upload,
   UserRound
 } from "lucide-react";
@@ -449,7 +448,7 @@ export default function App() {
     <div className="app">
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="brand">
-          <Store size={26} />
+          <img className="brand-mark" src="/brand/icon-192.png" alt="" />
           <span>Resell</span>
         </div>
         <LanguageControl locale={locale} setLocale={setLocale} text={text} />
@@ -523,6 +522,13 @@ export default function App() {
       </aside>
 
       <main className="main">
+        <header className="mobile-app-header">
+          <div className="brand mobile-brand">
+            <img className="brand-mark" src="/brand/icon-192.png" alt="" />
+            <span>Resell</span>
+          </div>
+          <div className="data-source">{dataSource === "cloudflare" ? "Cloudflare D1" : text.localDemo}</div>
+        </header>
         <div className="mobile-user-bar">
           {dataSource === "local" ? (
             <>
@@ -558,7 +564,6 @@ export default function App() {
             />
           )}
           <LanguageControl locale={locale} setLocale={setLocale} text={text} />
-          <div className="data-source">{dataSource === "cloudflare" ? "Cloudflare D1" : text.localDemo}</div>
         </div>
         {actionError && <p className="global-error">{actionError}</p>}
         {view === "browse" && (
