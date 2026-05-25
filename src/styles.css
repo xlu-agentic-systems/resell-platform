@@ -124,7 +124,13 @@ button:disabled {
   gap: 8px;
 }
 
+.language-control {
+  display: grid;
+  gap: 8px;
+}
+
 .user-switcher span,
+.language-control span,
 label span {
   font-size: 0.82rem;
   color: #65727c;
@@ -132,6 +138,10 @@ label span {
 }
 
 .sidebar .user-switcher span {
+  color: #bac5c9;
+}
+
+.sidebar .language-control span {
   color: #bac5c9;
 }
 

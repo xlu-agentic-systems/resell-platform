@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Bell,
   CheckCircle2,
+  Download,
   ImagePlus,
   MessageSquare,
   Package,
@@ -29,6 +30,7 @@ import {
 } from "./data/store";
 import {
   createRemoteListing,
+  exportRemoteData,
   fetchRemoteSession,
   fetchRemoteState,
   logoutRemoteSession,
@@ -40,9 +42,11 @@ import {
   updateRemoteListingStatus,
   updateRemoteProfile,
   updateRemoteReservationStatus,
-  verifyRemoteEmailCode
+  verifyRemoteEmailCode,
+  type ExportArchive
 } from "./data/remoteApi";
 import type { AppState, Listing, ListingDraft, ListingImage, ListingStatus, Reservation, User } from "./data/types";
+import { categoryLabel, copy, statusLabel, type Copy, type Locale } from "./i18n";
 
 type View = "browse" | "sell" | "orders" | "chat" | "notifications";
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
@@ -87,8 +91,87 @@ const emptyCloudState: AppState = {
   notifications: []
 };
 
+function createLocalExport(state: AppState, activeUser?: User | null): ExportArchive {
+  const user = activeUser ?? state.users[0] ?? { id: "local", name: "Local user", role: "seller" as const };
+  const reservations = state.reservations.filter(
+    (reservation) => reservation.buyerId === user.id || reservation.sellerId === user.id
+  );
+  const reservationIds = new Set(reservations.map((reservation) => reservation.id));
+  return {
+    formatVersion: 1,
+    exportedAt: new Date().toISOString(),
+    architecture: {
+      backend: [
+        "Cloudflare Pages Functions / Workers",
+        "Cloudflare D1",
+        "Cloudflare R2",
+        "Resend email login",
+        "HttpOnly session cookies",
+        "No payment provider"
+      ],
+      businessModels: [
+        "User / Profile",
+        "Listing",
+        "ListingImage",
+        "Reservation",
+        "ChatMessage",
+        "Notification",
+        "TrustBadge",
+        "ModerationStatus"
+      ],
+      frontends: [
+        "Current H5 / PWA web app",
+        "WeChat mini program later",
+        "Xiaohongshu mini program later",
+        "Messenger WebView later"
+      ],
+      adapters: [
+        "Login adapter",
+        "Share adapter",
+        "Notification adapter",
+        "Image upload adapter",
+        "Deep link / open-in-app adapter",
+        "No payment adapter"
+      ]
+    },
+    user,
+    trustBadges: [
+      ...(user.emailVerifiedAt ? (["email_verified"] as const) : []),
+      ...(user.phoneVerifiedAt ? (["phone_verified"] as const) : [])
+    ],
+    moderationStatuses: ["pending", "approved", "rejected", "flagged"],
+    state: {
+      ...state,
+      activeUserId: user.id,
+      listings: state.listings.filter((listing) => listing.sellerId === user.id),
+      reservations,
+      messages: state.messages.filter((message) => reservationIds.has(message.reservationId)),
+      notifications: state.notifications.filter((notification) => notification.userId === user.id)
+    }
+  };
+}
+
+function downloadJson(data: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function getInitialLocale(): Locale {
+  if (typeof window === "undefined") return "en";
+  const stored = window.localStorage.getItem("resell-locale");
+  return stored === "zh" ? "zh" : "en";
+}
+
 export default function App() {
   const allowLocalFallback = import.meta.env.DEV;
+  const [locale, setLocale] = useState<Locale>(getInitialLocale);
   const [state, setState] = useState<AppState>(() =>
     allowLocalFallback ? computeOverdueNotifications(loadState()) : emptyCloudState
   );
@@ -102,6 +185,12 @@ export default function App() {
   const [selectedListingId, setSelectedListingId] = useState<string | null>("listing-1");
   const [selectedReservationId, setSelectedReservationId] = useState<string | null>("reservation-1");
   const [query, setQuery] = useState("");
+  const text = copy[locale];
+
+  useEffect(() => {
+    window.localStorage.setItem("resell-locale", locale);
+    document.documentElement.lang = locale === "zh" ? "zh-Hans" : "en";
+  }, [locale]);
 
   useEffect(() => {
     if (dataSource === "local") {
@@ -127,7 +216,7 @@ export default function App() {
           }
           setDataSource("cloudflare");
           setState(emptyCloudState);
-          setActionError(error instanceof Error ? error.message : "Cloudflare API unavailable.");
+          setActionError(error instanceof Error ? error.message : text.cloudflareApiUnavailable);
         }
       });
     return () => {
@@ -187,7 +276,7 @@ export default function App() {
 
   function openReservationChat(reservationId: string) {
     if (dataSource === "cloudflare" && !sessionUser) {
-      promptLogin("Log in with email to chat about picked items.");
+      promptLogin(text.loginPickedChat);
       return;
     }
     setSelectedReservationId(reservationId);
@@ -196,7 +285,7 @@ export default function App() {
 
   function openReservationOrder(reservationId: string) {
     if (dataSource === "cloudflare" && !sessionUser) {
-      promptLogin("Log in with email to see your picked items.");
+      promptLogin(text.loginPickedItems);
       return;
     }
     setSelectedReservationId(reservationId);
@@ -218,7 +307,7 @@ export default function App() {
       setActionError("");
       return remoteState;
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Cloudflare request failed.");
+      setActionError(error instanceof Error ? error.message : text.cloudflareRequestFailed);
       throw error;
     }
   }
@@ -226,7 +315,7 @@ export default function App() {
   async function handleReserve(listingId: string) {
     if (dataSource === "cloudflare") {
       if (!sessionUser) {
-        promptLogin("Log in with email to reserve this item.");
+        promptLogin(text.loginReserve);
         return;
       }
       const beforeIds = new Set(state.reservations.map((reservation) => reservation.id));
@@ -262,7 +351,7 @@ export default function App() {
   async function handleCreateListing(draft: ListingDraft): Promise<boolean> {
     if (dataSource === "cloudflare") {
       if (!sessionUser) {
-        promptLogin("Log in with email to publish your first listing.");
+        promptLogin(text.loginPublishListing);
         return false;
       }
       const next = await runRemoteAction(() => createRemoteListing(draft));
@@ -281,7 +370,7 @@ export default function App() {
   function handleUpdateListingStatus(listingId: string, status: Exclude<ListingStatus, "reserved">) {
     if (dataSource === "cloudflare") {
       if (!sessionUser) {
-        promptLogin("Log in with email to manage your listings.");
+        promptLogin(text.loginManageListings);
         return;
       }
       runRemoteAction(() => updateRemoteListingStatus(listingId, status));
@@ -294,7 +383,7 @@ export default function App() {
   async function handleUpdateListing(listingId: string, draft: ListingDraft): Promise<boolean> {
     if (dataSource === "cloudflare") {
       if (!sessionUser) {
-        promptLogin("Log in with email to manage your listings.");
+        promptLogin(text.loginManageListings);
         return false;
       }
       await runRemoteAction(() => updateRemoteListing(listingId, draft));
@@ -307,6 +396,23 @@ export default function App() {
     return true;
   }
 
+  async function handleExportData() {
+    try {
+      if (dataSource === "cloudflare") {
+        if (!sessionUser) {
+          promptLogin(text.loginExport);
+          return;
+        }
+        downloadJson(await exportRemoteData(), `resell-export-${sessionUser.id}.json`);
+      } else {
+        downloadJson(createLocalExport(state, activeUser), `resell-local-export-${activeUser?.id ?? "demo"}.json`);
+      }
+      setAuthMessage(text.exportReady);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : text.exportFailed);
+    }
+  }
+
   return (
     <div className="app">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -314,14 +420,23 @@ export default function App() {
           <Store size={26} />
           <span>Resell</span>
         </div>
-        <div className="data-source">{dataSource === "cloudflare" ? "Cloudflare D1" : "Local demo"}</div>
+        <LanguageControl locale={locale} setLocale={setLocale} text={text} />
+        <div className="data-source">{dataSource === "cloudflare" ? "Cloudflare D1" : text.localDemo}</div>
         {dataSource === "local" ? (
-          <UserSwitcher state={state} setState={setState} />
+          <>
+            <UserSwitcher state={state} setState={setState} text={text} />
+            <button className="secondary" onClick={handleExportData}>
+              <Download size={16} />
+              {text.dataExport}
+            </button>
+          </>
         ) : (
           <AccountPanel
             user={sessionUser}
             message={authMessage}
+            text={text}
             onMessage={setAuthMessage}
+            onExport={handleExportData}
             onAuthenticated={(user, nextState) => {
               setSessionUser(user);
               setState(nextState);
@@ -340,36 +455,36 @@ export default function App() {
           />
         )}
         <nav>
-          <NavButton icon={<Search />} label="Browse" active={view === "browse"} onClick={() => setView("browse")} />
+          <NavButton icon={<Search />} label={text.browse} active={view === "browse"} onClick={() => setView("browse")} />
           <NavButton
             icon={<Upload />}
-            label="Sell"
+            label={text.sell}
             active={view === "sell"}
-            onClick={() => openProtectedView("sell", "Log in with email to sell an item.")}
+            onClick={() => openProtectedView("sell", text.loginSellAction)}
           />
           <NavButton
             icon={<ShoppingBag />}
-            label="Picked"
+            label={text.picked}
             active={view === "orders"}
-            onClick={() => openProtectedView("orders", "Log in with email to see your picked items.")}
+            onClick={() => openProtectedView("orders", text.loginOrdersAction)}
           />
           <NavButton
             icon={<MessageSquare />}
-            label="Chat"
+            label={text.chat}
             active={view === "chat"}
-            onClick={() => openProtectedView("chat", "Log in with email to chat with buyers and sellers.")}
+            onClick={() => openProtectedView("chat", text.loginChatAction)}
           />
           <NavButton
             icon={<Bell />}
-            label={`Alerts${unreadCount ? ` (${unreadCount})` : ""}`}
+            label={`${text.alerts}${unreadCount ? ` (${unreadCount})` : ""}`}
             active={view === "notifications"}
-            onClick={() => openProtectedView("notifications", "Log in with email to see your alerts.")}
+            onClick={() => openProtectedView("notifications", text.loginAlertsAction)}
           />
         </nav>
         {dataSource === "local" && (
           <button className="ghost reset" onClick={() => setState(computeOverdueNotifications(resetState()))}>
             <RefreshCcw size={16} />
-            Reset demo
+            {text.resetDemo}
           </button>
         )}
       </aside>
@@ -377,12 +492,20 @@ export default function App() {
       <main className="main">
         <div className="mobile-user-bar">
           {dataSource === "local" ? (
-            <UserSwitcher state={state} setState={setState} />
+            <>
+              <UserSwitcher state={state} setState={setState} text={text} />
+              <button className="secondary" onClick={handleExportData}>
+                <Download size={16} />
+                {text.dataExport}
+              </button>
+            </>
           ) : (
             <AccountPanel
               user={sessionUser}
               message={authMessage}
+              text={text}
               onMessage={setAuthMessage}
+              onExport={handleExportData}
               onAuthenticated={(user, nextState) => {
                 setSessionUser(user);
                 setState(nextState);
@@ -400,7 +523,8 @@ export default function App() {
               }}
             />
           )}
-          <div className="data-source">{dataSource === "cloudflare" ? "Cloudflare D1" : "Local demo"}</div>
+          <LanguageControl locale={locale} setLocale={setLocale} text={text} />
+          <div className="data-source">{dataSource === "cloudflare" ? "Cloudflare D1" : text.localDemo}</div>
         </div>
         {actionError && <p className="global-error">{actionError}</p>}
         {view === "browse" && (
@@ -412,10 +536,12 @@ export default function App() {
             setQuery={setQuery}
             selectListing={setSelectedListingId}
             reserveListing={handleReserve}
+            text={text}
+            locale={locale}
           />
         )}
         {dataSource === "cloudflare" && !sessionUser && view !== "browse" && (
-          <LoginRequiredPanel view={view} />
+          <LoginRequiredPanel view={view} text={text} />
         )}
         {view === "sell" && !(dataSource === "cloudflare" && !sessionUser) && (
           <SellView
@@ -433,6 +559,8 @@ export default function App() {
                 ? runRemoteAction(() => updateRemoteReservationStatus(reservationId, status))
                 : update(updateReservationStatus(state, reservationId, activeUser?.id ?? "", status))
             }
+            text={text}
+            locale={locale}
           />
         )}
         {view === "orders" && !(dataSource === "cloudflare" && !sessionUser) && (
@@ -447,6 +575,8 @@ export default function App() {
                 ? runRemoteAction(() => updateRemoteReservationStatus(reservationId, status))
                 : update(updateReservationStatus(state, reservationId, activeUser?.id ?? "", status))
             }
+            text={text}
+            locale={locale}
           />
         )}
         {view === "chat" && !(dataSource === "cloudflare" && !sessionUser) && (
@@ -466,6 +596,8 @@ export default function App() {
                 ? runRemoteAction(() => updateRemoteReservationStatus(reservationId, status))
                 : update(updateReservationStatus(state, reservationId, activeUser?.id ?? "", status))
             }
+            text={text}
+            locale={locale}
           />
         )}
         {view === "notifications" && !(dataSource === "cloudflare" && !sessionUser) && (
@@ -475,7 +607,7 @@ export default function App() {
             markAllRead={() => {
               if (dataSource === "cloudflare") {
                 if (!sessionUser) {
-                  promptLogin("Log in with email to manage notifications.");
+                  promptLogin(text.loginManageNotifications);
                   return;
                 }
                 runRemoteAction(() => markRemoteNotificationsRead());
@@ -489,6 +621,8 @@ export default function App() {
                 )
               });
             }}
+            text={text}
+            locale={locale}
           />
         )}
       </main>
@@ -496,30 +630,30 @@ export default function App() {
   );
 }
 
-function LoginRequiredPanel({ view }: { view: View }) {
-  const copy: Record<Exclude<View, "browse">, { eyebrow: string; title: string; body: string }> = {
+function LoginRequiredPanel({ view, text }: { view: View; text: Copy }) {
+  const panelCopy: Record<Exclude<View, "browse">, { eyebrow: string; title: string; body: string }> = {
     sell: {
-      eyebrow: "Account required",
-      title: "Log in to sell",
-      body: "Use the email code form to create your profile before publishing a listing."
+      eyebrow: text.accountRequired,
+      title: text.loginSellTitle,
+      body: text.loginSellBody
     },
     orders: {
-      eyebrow: "Account required",
-      title: "Log in to see picked items",
-      body: "Reservations, payment status, and alerts are tied to your verified profile."
+      eyebrow: text.accountRequired,
+      title: text.loginOrdersTitle,
+      body: text.loginOrdersBody
     },
     chat: {
-      eyebrow: "Account required",
-      title: "Log in to chat",
-      body: "Chats open after you reserve an item or another buyer reserves one of your listings."
+      eyebrow: text.accountRequired,
+      title: text.loginChatTitle,
+      body: text.loginChatBody
     },
     notifications: {
-      eyebrow: "Account required",
-      title: "Log in to see alerts",
-      body: "Payment reminders and unread message alerts are private to your account."
+      eyebrow: text.accountRequired,
+      title: text.loginAlertsTitle,
+      body: text.loginAlertsBody
     }
   };
-  const content = copy[view as Exclude<View, "browse">];
+  const content = panelCopy[view as Exclude<View, "browse">];
 
   return (
     <section className="workspace">
@@ -529,6 +663,26 @@ function LoginRequiredPanel({ view }: { view: View }) {
         <p>{content.body}</p>
       </div>
     </section>
+  );
+}
+
+function LanguageControl({
+  locale,
+  setLocale,
+  text
+}: {
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
+  text: Copy;
+}) {
+  return (
+    <label className="language-control">
+      <span>{text.languageToggle}</span>
+      <select value={locale} onChange={(event) => setLocale(event.target.value as Locale)}>
+        <option value="en">English</option>
+        <option value="zh">中文</option>
+      </select>
+    </label>
   );
 }
 
@@ -551,17 +705,17 @@ function NavButton({
   );
 }
 
-function UserSwitcher({ state, setState }: { state: AppState; setState: (state: AppState) => void }) {
+function UserSwitcher({ state, setState, text }: { state: AppState; setState: (state: AppState) => void; text: Copy }) {
   return (
     <label className="user-switcher">
-      <span>Demo user</span>
+      <span>{text.demoUser}</span>
       <select
         value={state.activeUserId}
         onChange={(event) => setState({ ...state, activeUserId: event.target.value })}
       >
         {state.users.map((user) => (
           <option key={user.id} value={user.id}>
-            {user.name} ({user.role})
+            {user.name} ({user.role === "seller" ? text.sellerRole : text.buyerRole})
           </option>
         ))}
       </select>
@@ -572,14 +726,18 @@ function UserSwitcher({ state, setState }: { state: AppState; setState: (state: 
 function AccountPanel({
   user,
   message,
+  text,
   onMessage,
+  onExport,
   onAuthenticated,
   onProfileUpdated,
   onLogout
 }: {
   user: User | null;
   message: string;
+  text: Copy;
   onMessage: (message: string) => void;
+  onExport: () => void;
   onAuthenticated: (user: User, state: AppState) => void;
   onProfileUpdated: (user: User, state: AppState) => void;
   onLogout: () => Promise<void>;
@@ -605,12 +763,12 @@ function AccountPanel({
       setEmail(result.email);
       if (result.verificationCode) {
         setCode(result.verificationCode);
-        onMessage(`Development verification code: ${result.verificationCode}`);
+        onMessage(`${text.developmentCode} ${result.verificationCode}`);
       } else {
-        onMessage("Check your email for the verification code.");
+        onMessage(text.checkEmail);
       }
     } catch (error) {
-      onMessage(error instanceof Error ? error.message : "Could not request code.");
+      onMessage(error instanceof Error ? error.message : text.requestCodeFailed);
     } finally {
       setPending(false);
     }
@@ -622,7 +780,7 @@ function AccountPanel({
       const result = await verifyRemoteEmailCode(email, code, displayName);
       onAuthenticated(result.user, result.state);
     } catch (error) {
-      onMessage(error instanceof Error ? error.message : "Could not verify code.");
+      onMessage(error instanceof Error ? error.message : text.verifyCodeFailed);
     } finally {
       setPending(false);
     }
@@ -637,9 +795,9 @@ function AccountPanel({
         bio
       });
       onProfileUpdated(result.user, result.state);
-      onMessage("Profile saved.");
+      onMessage(text.profileSaved);
     } catch (error) {
-      onMessage(error instanceof Error ? error.message : "Could not save profile.");
+      onMessage(error instanceof Error ? error.message : text.profileSaveFailed);
     } finally {
       setPending(false);
     }
@@ -650,27 +808,27 @@ function AccountPanel({
       <section className="account-panel">
         <div className="account-heading">
           <UserRound size={18} />
-          <strong>Log in or create account</strong>
+          <strong>{text.loginOrCreate}</strong>
         </div>
-        <p>No password needed. We will email a one-time code.</p>
+        <p>{text.noPassword}</p>
         {message && <p className="account-message">{message}</p>}
         <label>
-          <span>Display name</span>
+          <span>{text.displayName}</span>
           <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
         </label>
         <label>
-          <span>Email</span>
+          <span>{text.email}</span>
           <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
         </label>
         <button className="secondary" disabled={pending || !email.trim()} onClick={requestCode}>
-          Send login code
+          {text.sendLoginCode}
         </button>
         <label>
-          <span>Verification code</span>
+          <span>{text.verificationCode}</span>
           <input value={code} onChange={(event) => setCode(event.target.value)} />
         </label>
         <button className="primary" disabled={pending || !email.trim() || !code.trim()} onClick={verifyCode}>
-          Log in
+          {text.logIn}
         </button>
       </section>
     );
@@ -683,27 +841,31 @@ function AccountPanel({
         <strong>{user.name}</strong>
       </div>
       <div className="trust-row">
-        <span className="trust-badge">Email verified</span>
-        <span className="trust-badge muted-badge">{user.phoneVerifiedAt ? "Phone verified" : "No phone badge yet"}</span>
+        <span className="trust-badge">{text.emailVerified}</span>
+        <span className="trust-badge muted-badge">{user.phoneVerifiedAt ? text.phoneVerified : text.noPhoneBadge}</span>
       </div>
       {message && <p className="account-message">{message}</p>}
       <label>
-        <span>Display name</span>
+        <span>{text.displayName}</span>
         <input value={profileName} onChange={(event) => setProfileName(event.target.value)} />
       </label>
       <label>
-        <span>Pickup area</span>
+        <span>{text.pickupArea}</span>
         <input value={pickupArea} onChange={(event) => setPickupArea(event.target.value)} />
       </label>
       <label>
-        <span>Bio</span>
+        <span>{text.bio}</span>
         <textarea rows={3} value={bio} onChange={(event) => setBio(event.target.value)} />
       </label>
       <button className="secondary" disabled={pending || !profileName.trim()} onClick={saveProfile}>
-        Save profile
+        {text.saveProfile}
+      </button>
+      <button className="secondary" disabled={pending} onClick={onExport}>
+        <Download size={16} />
+        {text.dataExport}
       </button>
       <button className="ghost account-logout" disabled={pending} onClick={onLogout}>
-        Log out
+        {text.logOut}
       </button>
     </section>
   );
@@ -716,7 +878,9 @@ function BrowseView({
   query,
   setQuery,
   selectListing,
-  reserveListing
+  reserveListing,
+  text,
+  locale
 }: {
   listings: Listing[];
   selectedListing: Listing;
@@ -725,18 +889,20 @@ function BrowseView({
   setQuery: (query: string) => void;
   selectListing: (id: string) => void;
   reserveListing: (id: string) => void;
+  text: Copy;
+  locale: Locale;
 }) {
   return (
     <section className="workspace two-column">
       <div className="panel feed">
         <div className="section-header">
           <div>
-            <p className="eyebrow">Marketplace</p>
-            <h1>Pick up items from local sellers</h1>
+            <p className="eyebrow">{text.marketplace}</p>
+            <h1>{text.browseHeading}</h1>
           </div>
           <label className="search">
             <Search size={18} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search listings" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text.searchListings} />
           </label>
         </div>
         <div className="listing-grid">
@@ -748,7 +914,7 @@ function BrowseView({
             >
               <img src={getPrimaryImage(listing)} alt="" />
               <div>
-                <span className={`badge ${listing.status}`}>{listing.status}</span>
+                <span className={`badge ${listing.status}`}>{statusLabel(listing.status, locale)}</span>
                 <h2>{listing.title}</h2>
                 <p>${listing.price}</p>
               </div>
@@ -761,21 +927,21 @@ function BrowseView({
         <article className="panel detail">
           <ListingGallery listing={selectedListing} />
           <div className="detail-copy">
-            <span className={`badge ${selectedListing.status}`}>{selectedListing.status}</span>
+            <span className={`badge ${selectedListing.status}`}>{statusLabel(selectedListing.status, locale)}</span>
             <h2>{selectedListing.title}</h2>
             <p className="price">${selectedListing.price}</p>
             <p>{selectedListing.description}</p>
             <dl>
               <div>
-                <dt>Condition</dt>
-                <dd>{selectedListing.condition.replace("_", " ")}</dd>
+                <dt>{text.condition}</dt>
+                <dd>{statusLabel(selectedListing.condition, locale)}</dd>
               </div>
               <div>
-                <dt>Category</dt>
-                <dd>{selectedListing.category}</dd>
+                <dt>{text.category}</dt>
+                <dd>{categoryLabel(selectedListing.category, locale)}</dd>
               </div>
               <div>
-                <dt>Location</dt>
+                <dt>{text.location}</dt>
                 <dd>{selectedListing.location}</dd>
               </div>
             </dl>
@@ -785,7 +951,7 @@ function BrowseView({
               onClick={() => reserveListing(selectedListing.id)}
             >
               <ShoppingBag size={18} />
-              {selectedListing.sellerId === activeUserId ? "Your listing" : "Reserve item"}
+              {selectedListing.sellerId === activeUserId ? text.yourListing : text.reserveItem}
             </button>
           </div>
         </article>
@@ -817,7 +983,9 @@ function SellView({
   openChat,
   openOrder,
   updateStatus,
-  updateReservation
+  updateReservation,
+  text,
+  locale
 }: {
   activeUser: User | null;
   onCreate: (draft: ListingDraft) => Promise<boolean> | boolean;
@@ -829,6 +997,8 @@ function SellView({
   openOrder: (reservationId: string) => void;
   updateStatus: (listingId: string, status: Exclude<ListingStatus, "reserved">) => void;
   updateReservation: (reservationId: string, status: Reservation["status"]) => void;
+  text: Copy;
+  locale: Locale;
 }) {
   const [draft, setDraft] = useState<ListingDraft>(blankDraft);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -864,13 +1034,13 @@ function SellView({
       .filter((file) => file.type.startsWith("image/") && file.size <= MAX_IMAGE_BYTES)
       .slice(0, Math.max(0, 6 - draft.images.length));
     if (rejected.length > 0) {
-      setUploadError("Use image files under 2 MB.");
+      setUploadError(text.imageUploadLimit);
     }
     try {
       const images = await Promise.all(accepted.map(readImage));
       setDraft({ ...draft, images: [...draft.images, ...images] });
     } catch {
-      setUploadError("One image could not be read. Try a different file.");
+      setUploadError(text.imageReadFailed);
     }
   }
 
@@ -884,13 +1054,13 @@ function SellView({
       .filter((file) => file.type.startsWith("image/") && file.size <= MAX_IMAGE_BYTES)
       .slice(0, Math.max(0, 6 - editDraft.images.length));
     if (rejected.length > 0) {
-      setEditUploadError("Use image files under 2 MB.");
+      setEditUploadError(text.imageUploadLimit);
     }
     try {
       const images = await Promise.all(accepted.map(readImage));
       setEditDraft({ ...editDraft, images: [...editDraft.images, ...images] });
     } catch {
-      setEditUploadError("One image could not be read. Try a different file.");
+      setEditUploadError(text.imageReadFailed);
     }
   }
 
@@ -910,7 +1080,7 @@ function SellView({
       setEditingId(null);
       setEditDraft(null);
     } else {
-      setEditError("This listing could not be updated.");
+      setEditError(text.listingUpdateFailed);
     }
   }
 
@@ -929,12 +1099,12 @@ function SellView({
       >
         <div className="section-header">
           <div>
-            <p className="eyebrow">Sell</p>
-            <h1>Create a listing</h1>
+            <p className="eyebrow">{text.sell}</p>
+            <h1>{text.createListing}</h1>
           </div>
         </div>
         <label>
-          <span>Images</span>
+          <span>{text.images}</span>
           <input
             className="file-input"
             type="file"
@@ -956,18 +1126,18 @@ function SellView({
           {draft.images.length === 0 && (
             <div className="empty-upload">
               <ImagePlus size={26} />
-              <span>Add 1-6 images</span>
+              <span>{text.addImages}</span>
             </div>
           )}
         </div>
         {uploadError && <p className="form-error">{uploadError}</p>}
         <div className="field-grid">
           <label>
-            <span>Title</span>
+            <span>{text.title}</span>
             <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
           </label>
           <label>
-            <span>Price</span>
+            <span>{text.price}</span>
             <input
               type="number"
               min="1"
@@ -976,34 +1146,35 @@ function SellView({
             />
           </label>
           <label>
-            <span>Category</span>
+            <span>{text.category}</span>
             <select value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })}>
-              <option>Furniture</option>
-              <option>Electronics</option>
-              <option>Clothing</option>
-              <option>Home</option>
-              <option>Outdoor</option>
+              {["Furniture", "Electronics", "Clothing", "Home", "Outdoor"].map((category) => (
+                <option key={category} value={category}>
+                  {categoryLabel(category, locale)}
+                </option>
+              ))}
             </select>
           </label>
           <label>
-            <span>Condition</span>
+            <span>{text.condition}</span>
             <select
               value={draft.condition}
               onChange={(event) => setDraft({ ...draft, condition: event.target.value as ListingDraft["condition"] })}
             >
-              <option value="new">New</option>
-              <option value="like_new">Like new</option>
-              <option value="good">Good</option>
-              <option value="fair">Fair</option>
+              {["new", "like_new", "good", "fair"].map((condition) => (
+                <option key={condition} value={condition}>
+                  {statusLabel(condition, locale)}
+                </option>
+              ))}
             </select>
           </label>
         </div>
         <label>
-          <span>Pickup or shipping notes</span>
+          <span>{text.pickupNotes}</span>
           <input value={draft.location} onChange={(event) => setDraft({ ...draft, location: event.target.value })} />
         </label>
         <label>
-          <span>Description</span>
+          <span>{text.description}</span>
           <textarea
             value={draft.description}
             onChange={(event) => setDraft({ ...draft, description: event.target.value })}
@@ -1012,13 +1183,13 @@ function SellView({
         </label>
         <button className="primary" disabled={!canPublish}>
           <Package size={18} />
-          Publish listing
+          {text.publishListing}
         </button>
       </form>
 
       <aside className="panel compact-list">
-        <p className="eyebrow">My listings</p>
-        <h2>{activeUser?.name ?? "Account required"}</h2>
+        <p className="eyebrow">{text.myListings}</p>
+        <h2>{activeUser?.name ?? text.accountRequired}</h2>
         {sellerListings.map((listing) => {
           const activeReservation = reservations.find(
             (reservation) =>
@@ -1032,42 +1203,44 @@ function SellView({
               <img src={getPrimaryImage(listing)} alt="" />
               <div>
                 <strong>{listing.title}</strong>
-                <p className="muted">${listing.price} · Updated {new Date(listing.updatedAt).toLocaleDateString()}</p>
-                <span className={`badge ${listing.status}`}>{listing.status}</span>
+                <p className="muted">
+                  ${listing.price} · {text.updated} {new Date(listing.updatedAt).toLocaleDateString()}
+                </p>
+                <span className={`badge ${listing.status}`}>{statusLabel(listing.status, locale)}</span>
                 {activeReservation && (
                   <div className="reservation-context">
                     <div>
-                      <p className="muted">Reserved. Use Picked or Chat to mark paid or cancel.</p>
+                      <p className="muted">{text.reservedHelp}</p>
                       <p>
-                        Buyer {userNameFor(activeReservation.buyerId)} · Due{" "}
+                        {text.buyer} {userNameFor(activeReservation.buyerId)} · {text.due}{" "}
                         {new Date(activeReservation.paymentDueAt).toLocaleString()}
                       </p>
                     </div>
                     <span className={`badge ${activeReservation.status}`}>
-                      {activeReservation.status.replace("_", " ")}
+                      {statusLabel(activeReservation.status, locale)}
                     </span>
                     <div className="button-row reservation-shortcuts">
                       <button type="button" className="secondary" onClick={() => openChat(activeReservation.id)}>
                         <MessageSquare size={16} />
-                        Open chat
+                        {text.openChat}
                       </button>
                       <button type="button" className="secondary" onClick={() => openOrder(activeReservation.id)}>
                         <ShoppingBag size={16} />
-                        Open picked item
+                        {text.openPickedItem}
                       </button>
                       <button
                         type="button"
                         className="secondary"
                         onClick={() => updateReservation(activeReservation.id, "paid")}
                       >
-                        Mark paid
+                        {text.markPaid}
                       </button>
                       <button
                         type="button"
                         className="secondary"
                         onClick={() => updateReservation(activeReservation.id, "cancelled")}
                       >
-                        Cancel
+                        {text.cancel}
                       </button>
                     </div>
                   </div>
@@ -1075,7 +1248,7 @@ function SellView({
               </div>
               <div className="listing-actions">
                 <label className="status-control">
-                  <span>Status</span>
+                  <span>{text.status}</span>
                   <select
                     aria-label={`Status for ${listing.title}`}
                     value={selectableStatus}
@@ -1086,12 +1259,12 @@ function SellView({
                   >
                     {listing.status === "reserved" && (
                       <option value="reserved" disabled>
-                        Reserved
+                        {statusLabel("reserved", locale)}
                       </option>
                     )}
-                    <option value="available">Available</option>
-                    <option value="paused">Paused</option>
-                    <option value="sold">Sold</option>
+                    <option value="available">{statusLabel("available", locale)}</option>
+                    <option value="paused">{statusLabel("paused", locale)}</option>
+                    <option value="sold">{statusLabel("sold", locale)}</option>
                   </select>
                 </label>
                 <button
@@ -1100,7 +1273,7 @@ function SellView({
                   disabled={isTerminal || Boolean(activeReservation)}
                   onClick={() => startEditing(listing)}
                 >
-                  Edit
+                  {text.edit}
                 </button>
               </div>
               {editingId === listing.id && editDraft && (
@@ -1112,7 +1285,7 @@ function SellView({
                   }}
                 >
                   <label>
-                    <span>Images</span>
+                    <span>{text.images}</span>
                     <input
                       className="file-input"
                       type="file"
@@ -1139,14 +1312,14 @@ function SellView({
                     {editDraft.images.length === 0 && (
                       <div className="empty-upload">
                         <ImagePlus size={26} />
-                        <span>Add 1-6 images</span>
+                        <span>{text.addImages}</span>
                       </div>
                     )}
                   </div>
                   {editUploadError && <p className="form-error">{editUploadError}</p>}
                   <div className="field-grid">
                     <label>
-                      <span>Title</span>
+                      <span>{text.title}</span>
                       <input
                         aria-label={`Edit title for ${listing.title}`}
                         value={editDraft.title}
@@ -1154,7 +1327,7 @@ function SellView({
                       />
                     </label>
                     <label>
-                      <span>Price</span>
+                      <span>{text.price}</span>
                       <input
                         aria-label={`Edit price for ${listing.title}`}
                         type="number"
@@ -1164,21 +1337,21 @@ function SellView({
                       />
                     </label>
                     <label>
-                      <span>Category</span>
+                      <span>{text.category}</span>
                       <select
                         aria-label={`Edit category for ${listing.title}`}
                         value={editDraft.category}
                         onChange={(event) => setEditDraft({ ...editDraft, category: event.target.value })}
                       >
-                        <option>Furniture</option>
-                        <option>Electronics</option>
-                        <option>Clothing</option>
-                        <option>Home</option>
-                        <option>Outdoor</option>
+                        {["Furniture", "Electronics", "Clothing", "Home", "Outdoor"].map((category) => (
+                          <option key={category} value={category}>
+                            {categoryLabel(category, locale)}
+                          </option>
+                        ))}
                       </select>
                     </label>
                     <label>
-                      <span>Condition</span>
+                      <span>{text.condition}</span>
                       <select
                         aria-label={`Edit condition for ${listing.title}`}
                         value={editDraft.condition}
@@ -1186,15 +1359,16 @@ function SellView({
                           setEditDraft({ ...editDraft, condition: event.target.value as ListingDraft["condition"] })
                         }
                       >
-                        <option value="new">New</option>
-                        <option value="like_new">Like new</option>
-                        <option value="good">Good</option>
-                        <option value="fair">Fair</option>
+                        {["new", "like_new", "good", "fair"].map((condition) => (
+                          <option key={condition} value={condition}>
+                            {statusLabel(condition, locale)}
+                          </option>
+                        ))}
                       </select>
                     </label>
                   </div>
                   <label>
-                    <span>Pickup or shipping notes</span>
+                    <span>{text.pickupNotes}</span>
                     <input
                       aria-label={`Edit pickup or shipping notes for ${listing.title}`}
                       value={editDraft.location}
@@ -1202,7 +1376,7 @@ function SellView({
                     />
                   </label>
                   <label>
-                    <span>Description</span>
+                    <span>{text.description}</span>
                     <textarea
                       aria-label={`Edit description for ${listing.title}`}
                       value={editDraft.description}
@@ -1213,7 +1387,7 @@ function SellView({
                   {editError && <p className="form-error">{editError}</p>}
                   <div className="button-row">
                     <button className="primary" disabled={!canSaveEdit}>
-                      Save changes
+                      {text.saveChanges}
                     </button>
                     <button
                       type="button"
@@ -1224,7 +1398,7 @@ function SellView({
                         setEditError("");
                       }}
                     >
-                      Cancel
+                      {text.cancel}
                     </button>
                   </div>
                 </form>
@@ -1232,7 +1406,7 @@ function SellView({
             </div>
           );
         })}
-        {sellerListings.length === 0 && <p className="muted">Switch to the seller demo user to manage listings.</p>}
+        {sellerListings.length === 0 && <p className="muted">{text.noListings}</p>}
       </aside>
     </section>
   );
@@ -1244,7 +1418,9 @@ function OrdersView({
   activeUserId,
   selectedReservationId,
   openChat,
-  updateStatus
+  updateStatus,
+  text,
+  locale
 }: {
   state: AppState;
   reservations: Reservation[];
@@ -1252,14 +1428,16 @@ function OrdersView({
   selectedReservationId?: string;
   openChat: (id: string) => void;
   updateStatus: (reservationId: string, status: Reservation["status"]) => void;
+  text: Copy;
+  locale: Locale;
 }) {
   return (
     <section className="workspace">
       <div className="panel">
         <div className="section-header">
           <div>
-            <p className="eyebrow">Picked items</p>
-            <h1>Reservations and manual payment</h1>
+            <p className="eyebrow">{text.pickedItems}</p>
+            <h1>{text.ordersHeading}</h1>
           </div>
         </div>
         <div className="orders">
@@ -1273,29 +1451,29 @@ function OrdersView({
               >
                 <img src={listing ? getPrimaryImage(listing) : undefined} alt="" />
                 <div>
-                  <span className={`badge ${reservation.status}`}>{reservation.status.replace("_", " ")}</span>
-                  <h2>{listing?.title ?? "Deleted listing"}</h2>
-                  <p>Due {new Date(reservation.paymentDueAt).toLocaleString()}</p>
+                  <span className={`badge ${reservation.status}`}>{statusLabel(reservation.status, locale)}</span>
+                  <h2>{listing?.title ?? text.deletedListing}</h2>
+                  <p>{text.due} {new Date(reservation.paymentDueAt).toLocaleString()}</p>
                   <p className="muted">
-                    Buyer {getUserName(state, reservation.buyerId)} · Seller {getUserName(state, reservation.sellerId)}
+                    {text.buyer} {getUserName(state, reservation.buyerId)} · {text.seller} {getUserName(state, reservation.sellerId)}
                   </p>
                   <div className="button-row">
                     <button className="secondary" onClick={() => openChat(reservation.id)}>
                       <MessageSquare size={16} />
-                      Chat
+                      {text.chat}
                     </button>
                     {!isSeller && (
                       <button className="secondary" onClick={() => updateStatus(reservation.id, "payment_sent")}>
-                        Payment sent
+                        {text.paymentSent}
                       </button>
                     )}
                     {isSeller && (
                       <>
                         <button className="secondary" onClick={() => updateStatus(reservation.id, "paid")}>
-                          Mark paid
+                          {text.markPaid}
                         </button>
                         <button className="secondary" onClick={() => updateStatus(reservation.id, "cancelled")}>
-                          Cancel
+                          {text.cancel}
                         </button>
                       </>
                     )}
@@ -1304,7 +1482,7 @@ function OrdersView({
               </article>
             );
           })}
-          {reservations.length === 0 && <p className="muted">No reservations for this demo user yet.</p>}
+          {reservations.length === 0 && <p className="muted">{text.noReservations}</p>}
         </div>
       </div>
     </section>
@@ -1318,7 +1496,9 @@ function ChatView({
   selectReservation,
   reservations,
   send,
-  updateStatus
+  updateStatus,
+  text,
+  locale
 }: {
   state: AppState;
   activeUserId: string;
@@ -1327,6 +1507,8 @@ function ChatView({
   reservations: Reservation[];
   send: (reservationId: string, body: string) => void;
   updateStatus: (reservationId: string, status: Reservation["status"]) => void;
+  text: Copy;
+  locale: Locale;
 }) {
   const [body, setBody] = useState("");
   const messages = state.messages.filter((message) => message.reservationId === selectedReservation?.id);
@@ -1336,7 +1518,7 @@ function ChatView({
   return (
     <section className="workspace chat-layout">
       <aside className="panel compact-list">
-        <p className="eyebrow">Threads</p>
+        <p className="eyebrow">{text.threads}</p>
         {reservations.map((reservation) => {
           const item = state.listings.find((listingItem) => listingItem.id === reservation.listingId);
           return (
@@ -1346,7 +1528,7 @@ function ChatView({
               onClick={() => selectReservation(reservation.id)}
             >
               <img src={item ? getPrimaryImage(item) : undefined} alt="" />
-              <span>{item?.title ?? "Deleted listing"}</span>
+              <span>{item?.title ?? text.deletedListing}</span>
             </button>
           );
         })}
@@ -1359,11 +1541,11 @@ function ChatView({
               <div>
                 <h1>{listing.title}</h1>
                 <p>
-                  {getUserName(state, selectedReservation.buyerId)} and{" "}
+                  {getUserName(state, selectedReservation.buyerId)} {text.participantAnd}{" "}
                   {getUserName(state, selectedReservation.sellerId)}
                 </p>
               </div>
-              <span className={`badge ${selectedReservation.status}`}>{selectedReservation.status.replace("_", " ")}</span>
+              <span className={`badge ${selectedReservation.status}`}>{statusLabel(selectedReservation.status, locale)}</span>
             </header>
             <div className="messages">
               {messages.map((message) => (
@@ -1381,24 +1563,24 @@ function ChatView({
                 setBody("");
               }}
             >
-              <input value={body} onChange={(event) => setBody(event.target.value)} placeholder="Write a message" />
-              <button className="primary">Send</button>
+              <input value={body} onChange={(event) => setBody(event.target.value)} placeholder={text.writeMessage} />
+              <button className="primary">{text.send}</button>
             </form>
             <div className="button-row chat-actions">
               {!isSeller && (
                 <button className="secondary" onClick={() => updateStatus(selectedReservation.id, "payment_sent")}>
-                  Payment sent
+                  {text.paymentSent}
                 </button>
               )}
               {isSeller && (
                 <button className="secondary" onClick={() => updateStatus(selectedReservation.id, "paid")}>
-                  Mark paid
+                  {text.markPaid}
                 </button>
               )}
             </div>
           </>
         ) : (
-          <p className="muted">Reserve an item to start a buyer-seller chat.</p>
+          <p className="muted">{text.chatEmpty}</p>
         )}
       </div>
     </section>
@@ -1408,11 +1590,15 @@ function ChatView({
 function NotificationsView({
   state,
   activeUserId,
-  markAllRead
+  markAllRead,
+  text,
+  locale
 }: {
   state: AppState;
   activeUserId: string;
   markAllRead: () => void;
+  text: Copy;
+  locale: Locale;
 }) {
   const unreadNotifications = state.notifications.filter(
     (notification) => notification.userId === activeUserId && !notification.readAt
@@ -1423,24 +1609,24 @@ function NotificationsView({
       <div className="panel">
         <div className="section-header">
           <div>
-            <p className="eyebrow">Notifications</p>
-            <h1>Payment and message alerts</h1>
+            <p className="eyebrow">{text.notifications}</p>
+            <h1>{text.notificationsHeading}</h1>
           </div>
           <button className="secondary" disabled={unreadNotifications.length === 0} onClick={markAllRead}>
             <CheckCircle2 size={16} />
-            Mark read
+            {text.markRead}
           </button>
         </div>
         <div className="notifications">
           {unreadNotifications.map((notification) => (
             <article className="notice unread" key={notification.id}>
-              <span className={`badge ${notification.type}`}>{notification.type.replace("_", " ")}</span>
+              <span className={`badge ${notification.type}`}>{statusLabel(notification.type, locale)}</span>
               <h2>{notification.title}</h2>
               <p>{notification.body}</p>
               <time>{new Date(notification.createdAt).toLocaleString()}</time>
             </article>
           ))}
-          {unreadNotifications.length === 0 && <p className="muted">No unread notifications.</p>}
+          {unreadNotifications.length === 0 && <p className="muted">{text.noUnread}</p>}
         </div>
       </div>
     </section>

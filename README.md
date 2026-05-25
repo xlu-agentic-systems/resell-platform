@@ -37,6 +37,8 @@ npm run build
 - Seller can publish listings with 1-6 uploaded images.
 - Buyers can browse listings, reserve an available item, and open a reservation-scoped chat with the seller.
 - Cloudflare mode supports email-code account login, HttpOnly session cookies, editable profiles, and email/phone trust badge fields.
+- The H5/PWA web app supports English and Mandarin UI chrome for core marketplace workflows.
+- Logged-in users can export their account, listings, reservations, chat messages, notifications, trust badges, and moderation model metadata as JSON.
 - The app does not process payments. It tracks off-platform payment status only.
 - Payment is due 24 hours after reservation. The app creates one buyer notification and one seller notification when an unpaid reservation becomes overdue.
 - Plain local demo users can be switched from the left navigation on desktop. Cloudflare mode uses account login instead.
@@ -100,8 +102,16 @@ npm run deploy
 
 - D1 stores profiles, auth challenges, auth sessions, listings, listing image metadata, reservations, chat messages, and notifications.
 - Pages Functions expose email-code auth, `/api/me`, `/api/state`, `/api/listings`, `/api/reservations`, `/api/messages`, reservation status updates, and notification read actions.
+- Pages Functions expose `/api/export` for authenticated JSON export across the unified business models.
 - Protected mutations derive the actor from the HttpOnly session cookie instead of trusting browser-submitted user IDs.
 - Reservation creation updates listing availability in D1 with a conditional update, so a second buyer cannot reserve the same available item.
 - Chat writes messages to D1 after checking the sender is the reservation buyer or seller.
 - When the `LISTING_IMAGES` R2 binding is configured, new listing uploads store image bytes in R2 and D1 stores the served image path plus R2 key.
 - Until R2 is enabled, the Functions fallback stores uploaded image data URLs in D1 so the platform can still run with a real shared database.
+
+## Product Architecture
+
+- Backend layer: Cloudflare Pages Functions / Workers, D1, R2, Resend email login, HttpOnly sessions, and no payment provider.
+- Business model layer: User/Profile, Listing, ListingImage, Reservation, ChatMessage, Notification, TrustBadge, and ModerationStatus.
+- Frontend layer: current H5/PWA web app first; WeChat mini program, Xiaohongshu mini program, and Messenger WebView later.
+- Platform adapter layer: login, share, notification, image upload, deep link/open-in-app, and explicit no-payment adapters.

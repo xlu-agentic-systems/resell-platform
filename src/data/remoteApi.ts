@@ -1,4 +1,4 @@
-import type { AppState, ListingDraft, ListingStatus, ReservationStatus, User } from "./types";
+import type { AppState, ListingDraft, ListingStatus, ModerationStatus, ReservationStatus, TrustBadge, User } from "./types";
 
 export type RemoteSession = {
   user: User | null;
@@ -12,6 +12,21 @@ export type RequestCodeResponse = {
 
 export type AuthStateResponse = {
   user: User;
+  state: AppState;
+};
+
+export type ExportArchive = {
+  formatVersion: 1;
+  exportedAt: string;
+  architecture: {
+    backend: string[];
+    businessModels: string[];
+    frontends: string[];
+    adapters: string[];
+  };
+  user: User;
+  trustBadges: TrustBadge[];
+  moderationStatuses: ModerationStatus[];
   state: AppState;
 };
 
@@ -128,4 +143,8 @@ export async function markRemoteNotificationsRead(): Promise<AppState> {
     method: "POST",
     body: JSON.stringify({})
   });
+}
+
+export async function exportRemoteData(): Promise<ExportArchive> {
+  return apiRequest<ExportArchive>("/api/export");
 }
