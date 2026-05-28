@@ -41,11 +41,33 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error ?? `Request failed with ${response.status}`);
+    throw new Error(await getApiErrorMessage(response));
   }
 
   return (await response.json()) as T;
+}
+
+async function getApiErrorMessage(response: Response) {
+  const body = await response.text().catch(() => "");
+  const payload = parseJson<{ error?: string }>(body);
+  if (payload?.error) return payload.error;
+
+  const text = body.trim();
+  if (text && !text.startsWith("<")) return text;
+
+  if (response.status === 502 || response.status === 503 || response.status === 504) {
+    return "Service is temporarily unavailable. Try again in a few minutes.";
+  }
+
+  return `Request failed with ${response.status}`;
+}
+
+function parseJson<T>(value: string): T | null {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchRemoteState(activeUserId: string): Promise<AppState> {
