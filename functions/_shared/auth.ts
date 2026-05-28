@@ -349,8 +349,41 @@ async function sendVerificationEmail(env: Env, email: string, code: string) {
   if (!response.ok) {
     const details = await response.text().catch(() => "");
     console.error(`Resend email delivery failed (${response.status}): ${details}`);
-    throw new ApiError("Could not send verification email. Try again in a few minutes.", 502);
+    throw new ApiError(
+      getEmailDeliveryFailureMessage(response.status, details),
+      getEmailDeliveryFailureStatus(response.status)
+    );
   }
+}
+
+function getEmailDeliveryFailureStatus(status: number) {
+  if (status === 429) return 429;
+  if (status >= 400 && status < 500) return 400;
+  return 502;
+}
+
+function getEmailDeliveryFailureMessage(status: number, details: string) {
+  const normalizedDetails = details.toLowerCase();
+
+  if (
+    status === 401 ||
+    status === 403 ||
+    normalizedDetails.includes("api key") ||
+    normalizedDetails.includes("sender") ||
+    normalizedDetails.includes("verified")
+  ) {
+    return "Email login is not configured correctly. Contact support.";
+  }
+
+  if (status === 429) {
+    return "Too many email codes requested. Try again later.";
+  }
+
+  if (status >= 400 && status < 500) {
+    return "Email delivery rejected this address. Try another email address.";
+  }
+
+  return "Email delivery service is temporarily unavailable. Try again in a few minutes.";
 }
 
 function getCookie(request: Request, name: string) {
